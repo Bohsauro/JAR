@@ -13,13 +13,14 @@ from pydantic import BaseModel
 from . import engine
 from . import keys
 from . import orclient
+from . import providers
 from . import ranking
 from . import router_proxy
 from . import store
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
-app = FastAPI(title="PennyRoute", version="1.6.0")
+app = FastAPI(title="PennyRoute", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -93,7 +94,71 @@ def api_state():
         "primary_chain": primary["name"] if primary else None,
         "settings": settings,
         "model_count": len(store.load_models()),
+        "providers": providers.overview(),
     }
+
+
+# ------------------------------------------------------------- providers ---
+
+class ProviderIn(BaseModel):
+    note: str | None = None
+    blocked: bool | None = None
+    limits: dict | None = None
+
+
+@app.get("/api/providers")
+def api_providers():
+    """Registry + usage + status per provider. Unavailable/blocked first."""
+    reg = providers.load_registry()
+    usage = providers.load_usage()
+    out = []
+    for name, entry in reg.items():
+        entry = entry if isinstance(entry, dict) else {}
+        st = providers.limits_status(name)
+        out.append({
+            "name": name,
+            "note": entry.get("note") or "",
+            "blocked": bool(entry.get("blocked")),
+            "limits": entry.get("limits") or {},
+            "usage": usage.get(name) or {},
+            "status": st,
+        })
+
+    def sort_key(p):
+        day = (p["usage"] or {}).get("day") or {}
+        base = 0 if not providers.is_available(p["name"])["available"] else 1
+        return (base, -(day.get("requests") or 0))
+
+    out.sort(key=sort_key)
+    return {"providers": out}
+
+
+@app.put("/api/providers/{name}")
+def api_put_provider(name: str, p: ProviderIn):
+    patch = {}
+    if p.note is not None:
+        patch["note"] = p.note
+    if p.blocked is not None:
+        patch["blocked"] = p.blocked
+    if p.limits is not None:
+        patch["limits"] = p.limits
+    merged = providers.set_provider(name, patch)
+    return {"ok": True, "provider": merged}
+
+
+@app.delete("/api/providers/{name}")
+def api_del_provider(name: str):
+    if not providers.remove_provider(name):
+        raise HTTPException(404, "provider not found")
+    return {"ok": True}
+
+
+@app.post("/api/providers/{name}/reset")
+def api_reset_provider(name: str):
+    if name not in providers.load_registry():
+        raise HTTPException(404, "provider not found")
+    providers.reset_usage(name)
+    return {"ok": True}
 
 
 # --------------------------------------------------------------- ranking ---
@@ -115,12 +180,71 @@ def api_endpoints(slug: str, force: bool = False):
                                   {"min_tps": settings["min_tps"],
                                    "min_uptime": settings["min_uptime"]},
                                   force=force)
+    if isinstance(rows, list):
+        for r in rows:
+            if isinstance(r, dict) and "error" not in r:
+                r["available"] = providers.is_available(r["provider"])["available"]
     return {"slug": slug, "mix": settings["mix"], "endpoints": rows}
 
 
+_FAMILY_FACET_TOP = 30
+_CATALOG_LIMIT_MAX = 200
+_CATALOG_LIMIT_DEFAULT = 50
+
+
 @app.get("/api/catalog")
-def api_catalog(q: str = ""):
-    return {"results": orclient.search_catalog(q)}
+def api_catalog(q: str = "", tier: str = "", family: str = "", tag: str = "",
+                sort: str = "", limit: int = _CATALOG_LIMIT_DEFAULT,
+                offset: int = 0):
+    """Full catalog with health-free filters + facets (spec 1.3)."""
+    cat = orclient.fetch_catalog()
+    if isinstance(cat, dict):
+        return cat
+    q = (q or "").strip().lower()
+    wl = {m["slug"] for m in store.load_models()}
+
+    def match(e):
+        if q and q not in e["id"].lower() and q not in (e["name"] or "").lower():
+            return False
+        if tier and e["tier"] != tier:
+            return False
+        if family and e["family"] != family:
+            return False
+        if tag and tag not in e["tags"]:
+            return False
+        return True
+
+    filtered = [e for e in cat if match(e)]
+
+    if sort == "price_asc":
+        filtered.sort(key=lambda e: (e["in_$M"] is None, e["in_$M"] or 0.0))
+    elif sort == "price_desc":
+        filtered.sort(key=lambda e: (e["in_$M"] is None, -(e["in_$M"] or 0.0)))
+    elif sort == "name":
+        filtered.sort(key=lambda e: (e["name"] or e["id"] or "").lower())
+    elif sort == "ctx_desc":
+        filtered.sort(key=lambda e: (e["ctx"] is None, -(e["ctx"] or 0)))
+
+    # facets over the FULL catalog (not the filtered page)
+    tiers = {}
+    tags = {}
+    fam = {}
+    for e in cat:
+        tiers[e["tier"]] = tiers.get(e["tier"], 0) + 1
+        fam[e["family"]] = fam.get(e["family"], 0) + 1
+        for t in e["tags"] or []:
+            tags[t] = tags.get(t, 0) + 1
+    fam_rank = sorted(fam.items(), key=lambda kv: (-kv[1], kv[0]))
+    families = {n: c for n, c in fam_rank[:_FAMILY_FACET_TOP]}
+    other = sum(c for _, c in fam_rank[_FAMILY_FACET_TOP:])
+    if other:
+        families["other"] = other
+
+    limit = max(1, min(limit or _CATALOG_LIMIT_DEFAULT, _CATALOG_LIMIT_MAX))
+    offset = max(0, offset or 0)
+    results = [dict(e, wl=e["id"] in wl) for e in filtered[offset:offset + limit]]
+    return {"total": len(filtered), "results": results,
+            "facets": {"tiers": tiers, "families": families, "tags": tags}}
 
 
 # ---------------------------------------------------------------- models ---
@@ -128,6 +252,10 @@ def api_catalog(q: str = ""):
 class ModelIn(BaseModel):
     slug: str
     note: str = ""
+
+
+class ModelsBulkIn(BaseModel):
+    slugs: list[str] = []
 
 
 @app.get("/api/models")
@@ -161,6 +289,23 @@ def api_add_model(m: ModelIn):
     return {"ok": True}
 
 
+@app.post("/api/models/bulk")
+def api_models_bulk(b: ModelsBulkIn):
+    """Add many watchlist entries; dedup + skip existing (never errors)."""
+    added = skipped = 0
+    for slug in b.slugs or []:
+        slug = (slug or "").strip()
+        if not slug:
+            skipped += 1
+            continue
+        if store.add_model(slug, ""):
+            added += 1
+        else:
+            skipped += 1
+    store.log_event("bulk_add", {"added": added, "skipped": skipped})
+    return {"ok": True, "added": added, "skipped": skipped}
+
+
 @app.delete("/api/models/{slug:path}")
 def api_del_model(slug: str):
     if not store.remove_model(slug):
@@ -173,6 +318,7 @@ def api_del_model(slug: str):
 class ChainIn(BaseModel):
     name: str
     auto_apply: bool = True
+    note: str = ""
     entries: list[dict] = []
 
 
@@ -187,6 +333,12 @@ def _validate_chain(chain: dict):
             raise HTTPException(400, "model entry without slug")
         if e.get("type") not in ("model", "cheapest"):
             raise HTTPException(400, "unknown entry type")
+        if "note" in e and e["note"] is not None and not isinstance(e["note"], str):
+            raise HTTPException(400, "entry note must be a string")
+        if "providers" in e and e["providers"] is not None:
+            if not isinstance(e["providers"], list) or not all(
+                    isinstance(x, str) and x for x in e["providers"]):
+                raise HTTPException(400, "entry providers must be a list of non-empty strings")
 
 
 @app.post("/api/chains")
@@ -195,7 +347,7 @@ def api_add_chain(c: ChainIn):
     if any(x["name"] == c.name for x in chains):
         raise HTTPException(409, "chain name exists")
     chain = {"name": c.name, "primary": False, "auto_apply": c.auto_apply,
-             "entries": c.entries}
+             "note": c.note, "entries": c.entries}
     _validate_chain(chain)
     chains.append(chain)
     store.save_chains(chains)
@@ -208,7 +360,8 @@ def api_update_chain(name: str, c: ChainIn):
     for i, x in enumerate(chains):
         if x["name"] == name:
             chain = {"name": name, "primary": x.get("primary", False),
-                     "auto_apply": c.auto_apply, "entries": c.entries}
+                     "auto_apply": c.auto_apply, "note": c.note,
+                     "entries": c.entries}
             _validate_chain(chain)
             chains[i] = chain
             store.save_chains(chains)

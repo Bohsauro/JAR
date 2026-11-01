@@ -17,6 +17,9 @@ let STATE = { active: {}, settings: {}, primary_chain: null };
 let RANKED = [];
 let CHAINS = [];
 let MODELS = [];
+let PROVIDERS = [];
+let CHAIN_AVAIL = {};
+const CAT = { q: "", tier: "", family: "", tag: "", sort: "", limit: 50, offset: 0, total: 0, results: [], facets: null };
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -45,12 +48,16 @@ const ICONS = {
   models: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 12h16M12 4v16"/></svg>',
   settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
   events: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l2.5 2.5"/></svg>',
+  catalog: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>',
+  providers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 8h.01M6 18h.01"/></svg>',
 };
 
 const NAV = [
   ["overview", "Overview", ICONS.overview],
   ["ranking", "Ranking", ICONS.ranking],
+  ["catalog", "Catalog", ICONS.catalog],
   ["chains", "Fallback chains", ICONS.chains],
+  ["providers", "Providers", ICONS.providers],
   ["api", "API endpoint", ICONS.api],
   ["chat", "Chat", ICONS.chat],
   ["models", "Watchlist", ICONS.models],
@@ -141,10 +148,11 @@ function viewOverview() {
 let _ovTimer = null;
 
 async function loadOverview() {
-  const [tml, pipe, ev] = await Promise.all([
+  const [tml, pipe, ev, prov] = await Promise.all([
     api("/api/telemetry").catch(() => ({ points: [], avg_latency: 0 })),
     api("/api/pipeline").catch(() => ({ candidates: [] })),
     api("/api/events?limit=6").catch(() => ({ events: [] })),
+    api("/api/providers").catch(() => ({ providers: [] })),
   ]);
   // average latency across candidates (ms)
   const lats = (pipe.candidates || []).map(c => c.latency).filter(v => v != null);
@@ -219,6 +227,7 @@ async function loadOverview() {
     ["out", b.out, "var(--amber)"],
   ]) : [];
   const maxC = Math.max(...cands.map(c => c.blended || 0).filter(Boolean), 0.0001);
+  const ovProvs = ovProviderRows(prov.providers || []);
   $("#ov-side").innerHTML = `
     <div class="panel">
       <span class="live-pill"><span class="pulse"></span><span>Routing Engine Live</span><span class="u">· 5m</span></span>
@@ -254,6 +263,9 @@ async function loadOverview() {
         <span class="pc">${c.blended != null ? fmt(c.blended) : "—"}</span>
         <button class="sm ghost route" data-r="${esc(c.model)}" data-rp="${esc(c.provider)}">Route</button>
       </div>`).join("") || '<div class="empty">no candidates</div>'}</div>
+    </div>
+    <div class="panel"><h2><span class="k">Provider usage</span> — day limits</h2>
+      <div>${ovProvs}</div>
     </div>
     <div class="panel"><h2><span class="k">Recent events</span></h2>
       <div>${ev.events.length ? ev.events.slice(0, 5).map(e => `<div class="ev-row"><span class="ts">${esc(e.ts)}</span><span class="badge ${e.event === "switch" ? "ok" : e.event === "engine_error" ? "bad" : "neut"}">${esc(e.event)}</span></div>`).join("") : '<div class="empty">no events</div>'}</div>
@@ -380,12 +392,478 @@ async function applyChoice(model, provider) {
   } catch (e) { toast(e.message, true); }
 }
 
-/* ---------------------------------------------------------------- chains */
+/* ---------------------------------------------------------------- catalog */
 
-function viewChains() {
+const TIER_ORDER = ["free", "budget", "value", "mid", "premium", "ultra"];
+
+function tierBadge(t) {
+  const k = TIER_ORDER.includes(t) ? t : "unknown";
+  return `<span class="badge tier-${esc(k)}">${esc(t || "unknown")}</span>`;
+}
+
+function catParams() {
+  const p = { limit: CAT.limit, offset: CAT.offset };
+  if (CAT.q) p.q = CAT.q;
+  if (CAT.tier) p.tier = CAT.tier;
+  if (CAT.family) p.family = CAT.family;
+  if (CAT.tag) p.tag = CAT.tag;
+  if (CAT.sort) p.sort = CAT.sort;
+  return p;
+}
+
+function catQS(extra) {
+  return new URLSearchParams(Object.entries({ ...catParams(), ...extra })
+    .filter(([, v]) => v !== "" && v != null)
+    .map(([k, v]) => [k, String(v)])).toString();
+}
+
+async function refreshRankedModels() {
+  try {
+    const [md, rk] = await Promise.all([api("/api/models"), api("/api/rank")]);
+    MODELS = md.models; RANKED = rk.models;
+  } catch (e) {}
+}
+
+function viewCatalog() {
+  CAT.offset = 0;
   $("#view").innerHTML = `
     <div class="page-head">
-      <div><h1>Fallback chains</h1><div class="sub">Ordered pipelines. The primary chain drives your config; the engine walks it top → bottom and uses the first healthy step.</div></div>
+      <div><h1>Catalog</h1><div class="sub">The full OpenRouter catalog, classified by tier / family / tag. Add models to your watchlist.</div></div>
+      <button class="primary" id="cat-addall"></button>
+    </div>
+    <div class="panel">
+      <div class="cat-toolbar">
+        <div class="row-ctl" style="align-items:center;gap:14px">
+          <div style="flex:1 1 360px;max-width:420px"><input id="cat-q" placeholder="Search models…" value="${esc(CAT.q)}"></div>
+          <div style="flex:0 1 220px"><select id="cat-family"></select></div>
+          <div style="flex:0 1 190px"><select id="cat-sort">
+              <option value="">relevance</option>
+              <option value="price_asc">price ↑</option>
+              <option value="price_desc">price ↓</option>
+              <option value="name">name</option>
+              <option value="ctx_desc">context window ↓</option>
+            </select></div>
+        </div>
+        <div class="facets" id="cat-tiers"></div>
+        <div class="facets" id="cat-tags"></div>
+      </div>
+      <div id="cat-result"><span class="spinner"></span></div>
+    </div>`;
+
+  let qDeb;
+  $("#cat-q").oninput = () => {
+    clearTimeout(qDeb);
+    qDeb = setTimeout(() => {
+      CAT.q = $("#cat-q").value.trim();
+      loadCatalog(true);
+    }, 300);
+  };
+  $("#cat-family").onchange = () => { CAT.family = $("#cat-family").value; loadCatalog(true); };
+  $("#cat-sort").onchange = () => { CAT.sort = $("#cat-sort").value; loadCatalog(true); };
+  $("#cat-addall").onclick = addAllFiltered;
+  loadCatalog(true);
+}
+
+async function loadCatalog(reset) {
+  if (reset) CAT.offset = 0;
+  let r;
+  try {
+    r = await api("/api/catalog?" + catQS());
+  } catch (e) { $("#cat-result").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  CAT.total = r.total;
+  CAT.facets = r.facets;
+  CAT.results = reset ? r.results : CAT.results.concat(r.results);
+  CAT.offset = CAT.results.length;
+  renderCatalogControls();
+  renderCatalogTable();
+}
+
+function renderCatalogControls() {
+  const f = CAT.facets || { tiers: {}, families: {}, tags: {} };
+  const tiers = f.tiers || {};
+  const keys = TIER_ORDER.filter(k => k in tiers)
+    .concat(Object.keys(tiers).filter(k => !TIER_ORDER.includes(k)));
+  $("#cat-tiers").innerHTML = `<span class="facet ${!CAT.tier ? "on" : ""}" data-tier="">All<span class="n">${CAT.total}</span></span>` +
+    keys.map(k => `<span class="facet ${CAT.tier === k ? "on" : ""}" data-tier="${esc(k)}">${esc(k)}<span class="n">${tiers[k]}</span></span>`).join("");
+  const fams = f.families || {};
+  $("#cat-family").innerHTML = `<option value="">all families</option>` +
+    Object.entries(fams).map(([k, c]) => `<option value="${esc(k)}" ${CAT.family === k ? "selected" : ""}>${esc(k)} (${c})</option>`).join("");
+  $("#cat-tags").innerHTML = Object.entries(f.tags || {}).map(([k, c]) =>
+    `<span class="facet ${CAT.tag === k ? "on" : ""}" data-tag="${esc(k)}">${esc(k)}<span class="n">${c}</span></span>`).join("");
+  $("#cat-addall").textContent = CAT.total ? `Add all (${CAT.total}) filtered` : "Add all (0) filtered";
+  $("#cat-addall").disabled = !CAT.total;
+  $("#cat-sort").value = CAT.sort;
+  $$("#cat-tiers .facet").forEach(el => el.onclick = () => { CAT.tier = el.dataset.tier; loadCatalog(true); });
+  $$("#cat-tags .facet").forEach(el => el.onclick = () => { CAT.tag = CAT.tag === el.dataset.tag ? "" : el.dataset.tag; loadCatalog(true); });
+}
+
+function catRow(m) {
+  return `<tr>
+    <td><div class="model-name">${esc(m.id)}</div><div class="model-sub">${esc(m.name || "")}</div></td>
+    <td>${tierBadge(m.tier)}</td>
+    <td><span class="mini">${esc(m.family || "—")}</span></td>
+    <td class="num">${m.ctx ? (m.ctx / 1000).toFixed(1) + "k" : "—"}</td>
+    <td class="num">${fmt(m.in_$M)}</td>
+    <td class="num">${fmt(m.out_$M)}</td>
+    <td>${(m.tags || []).map(t => `<span class="chip" style="margin-right:4px">${esc(t)}</span>`).join("") || '<span class="faint">—</span>'}</td>
+    <td>${m.wl ? '<span class="badge ok">✓ in watchlist</span>' : `<button class="sm" data-act="add" data-slug="${esc(m.id)}">+ Add</button>`}</td>
+  </tr>`;
+}
+
+function renderCatalogTable() {
+  const rows = CAT.results;
+  $("#cat-result").innerHTML = `
+    <div class="hint" style="margin:0 0 8px">${CAT.total} result${CAT.total === 1 ? "" : "s"} · showing ${rows.length}</div>
+    <div style="overflow:auto"><table>
+      <thead><tr><th>Model</th><th>Tier</th><th>Family</th><th class="num">ctx</th><th class="num">in $/M</th><th class="num">out $/M</th><th>Tags</th><th></th></tr></thead>
+      <tbody>${rows.map(catRow).join("")}</tbody>
+    </table></div>
+    ${CAT.offset < CAT.total ? `<div style="text-align:center;margin-top:14px"><button id="cat-loadmore">Load more (${CAT.total - CAT.offset} more)</button></div>` : ""}`;
+  $$("#cat-result button[data-act='add']").forEach(b => b.onclick = async () => {
+    try {
+      await api("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ slug: b.dataset.slug }) });
+      const m = CAT.results.find(x => x.id === b.dataset.slug);
+      if (m) m.wl = true;
+      toast("Added: " + b.dataset.slug);
+      await refreshRankedModels();
+      renderCatalogTable();
+    } catch (e) { toast(e.message, true); }
+  });
+  const lm = $("#cat-loadmore");
+  if (lm) lm.onclick = () => loadCatalog(false);
+}
+
+async function addAllFiltered() {
+  const ids = [];
+  const p = { limit: 200, offset: 0 };
+  if (CAT.q) p.q = CAT.q;
+  if (CAT.tier) p.tier = CAT.tier;
+  if (CAT.family) p.family = CAT.family;
+  if (CAT.tag) p.tag = CAT.tag;
+  try {
+    for (let offset = 0; ;) {
+      const r = await api("/api/catalog?" + catQS({ ...p, offset }));
+      r.results.forEach(m => ids.push(m.id));
+      CAT.total = r.total;
+      offset += r.results.length;
+      if (offset >= r.total) break;
+    }
+    if (!ids.length) { toast("nothing to add", true); return; }
+    const res = await api("/api/models/bulk", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ slugs: ids }) });
+    toast(`Added ${res.added}, skipped ${res.skipped}`);
+    const set = new Set(ids);
+    CAT.results.forEach(m => { if (set.has(m.id)) m.wl = true; });
+    await refreshRankedModels();
+    renderCatalogTable();
+  } catch (e) { toast(e.message, true); }
+}
+
+/* -------------------------------------------------------------- providers */
+
+function fmtGauge(v, kind) {
+  if (kind === "usd") return "$" + Number(v).toFixed(4);
+  const n = Math.round(Number(v));
+  return n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n);
+}
+
+function gaugeHtml(s, kind) {
+  const pct = Math.min(100, Math.round(s.pct || 0));
+  const color = s.exhausted ? "var(--red)" : pct >= 80 ? "var(--amber)" : "var(--green)";
+  const maxTxt = s.max == null ? "∞" : fmtGauge(s.max, kind);
+  return `<div class="gauge" style="text-align:left">
+    <div class="g-top"><span>${fmtGauge(s.used, kind)} / ${maxTxt}</span><span style="color:${color}">${s.exhausted ? 100 : pct}%</span></div>
+    <div class="g-bar"><span style="width:${s.exhausted ? 100 : pct}%;background:${color}"></span></div>
+    <div class="g-bot"><span>left ${s.remaining == null ? "—" : fmtGauge(s.remaining, kind)}</span></div>
+  </div>`;
+}
+
+function provStatusBadge(p) {
+  const st = p.status || {};
+  if (p.blocked) return '<span class="badge bad">BLOCKED</span>';
+  if (st.requests && st.requests.exhausted || st.tokens && st.tokens.exhausted || st.spend && st.spend.exhausted)
+    return '<span class="badge bad">EXHAUSTED</span>';
+  if (Object.keys(p.limits || {}).length) return '<span class="badge ok">OK</span>';
+  return '<span class="badge neut">no limits</span>';
+}
+
+function resetPer(st) {
+  for (const k of ["requests", "tokens", "spend"]) {
+    if (st[k] && st[k].per) return st[k].per;
+  }
+  return "";
+}
+
+function fmtDur(ms) {
+  const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
+  return h ? `${h}h ${m}m` : `${m}m`;
+}
+
+function resetInLabel(per) {
+  if (!per || per === "total") return "—";
+  const now = new Date();
+  if (per === "day") {
+    const mid = new Date(now); mid.setHours(24, 0, 0, 0);
+    return fmtDur(mid - now);
+  }
+  const nxt = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+  return fmtDur(nxt - now);
+}
+
+function winTable(p, w) {
+  const u = (p.usage || {})[w];
+  const head = `<div class="k" style="font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)">${w}${u && u.window ? " · " + esc(u.window) : ""}</div>`;
+  if (!u || !Object.keys(u).length) return `<div>${head}<div class="empty">no usage</div></div>`;
+  return `<div>${head}
+    <table style="font-size:12px"><thead><tr><th class="num">req</th><th class="num">in</th><th class="num">out</th><th class="num">spend</th></tr></thead>
+    <tbody><tr><td class="num">${u.requests ?? 0}</td><td class="num">${fmtGauge(u.tokens_in || 0, "tok")}</td><td class="num">${fmtGauge(u.tokens_out || 0, "tok")}</td><td class="num">$${(Number(u.spend) || 0).toFixed(4)}</td></tr></tbody></table>
+  </div>`;
+}
+
+function viewProviders() {
+  $("#view").innerHTML = `
+    <div class="page-head">
+      <div><h1>Providers</h1><div class="sub">Budget limits & usage per provider. Exhausted or blocked providers are auto-skipped by the router.</div></div>
+      <div style="display:flex;gap:8px"><button class="ghost" id="btn-padd">+ Add provider</button><button class="ghost" id="btn-prefresh">↻ Refresh</button></div>
+    </div>
+    <div class="panel">
+      <div style="margin-bottom:12px;max-width:340px"><input id="prov-filter" placeholder="filter providers…"></div>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr>
+            <th>Provider</th><th>Status</th>
+            <th class="num">Day requests</th><th class="num">Day tokens</th><th class="num">Day spend</th>
+            <th class="num">Reset in</th><th>Last used</th><th style="text-align:right">Actions</th>
+          </tr></thead>
+          <tbody id="prov-rows"></tbody>
+        </table>
+      </div>
+      <div id="prov-count" class="hint" style="margin-top:10px"></div>
+    </div>`;
+  $("#btn-prefresh").onclick = loadProviders;
+  $("#btn-padd").onclick = async () => {
+    const name = prompt("Provider name (e.g. OpenRouter, Baidu):");
+    if (!name || !name.trim()) return;
+    try {
+      await api("/api/providers/" + encodeURIComponent(name.trim()), { method: "PUT", headers: { "Content-Type": "application/json" }, body: "{}" });
+      toast("Provider added: " + name.trim());
+      loadProviders();
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#prov-filter").oninput = renderProvidersTable;
+  loadProviders();
+}
+
+async function loadProviders() {
+  try {
+    const d = await api("/api/providers");
+    PROVIDERS = d.providers || [];
+    CHAIN_AVAIL = availMapFrom(PROVIDERS);
+  } catch (e) { toast(e.message, true); }
+  renderProvidersTable();
+}
+
+function renderProvidersTable() {
+  const q = ($("#prov-filter").value || "").trim().toLowerCase();
+  const list = PROVIDERS.filter(p => !q || p.name.toLowerCase().includes(q));
+  $("#prov-rows").innerHTML = list.map((p, i) => {
+    const st = p.status || {};
+    const rs = st.requests, ts = st.tokens, ss = st.spend;
+    const hasLimits = Object.keys(p.limits || {}).length > 0;
+    const note = hasLimits
+      ? (p.note ? esc(p.note) : "&nbsp;")
+      : `<span style="color:var(--faint);font-size:11.5px">no limits — configure via Edit</span>`;
+    const det = `<div class="detail-box"><div class="grid3">${winTable(p, "month")}${winTable(p, "total")}<div></div></div></div>`;
+    return `
+      <tr>
+        <td><div class="model-name expand-toggle" data-toggle="exp-${i}" style="cursor:pointer">${esc(p.name)}</div>
+          <div style="font-size:11.5px;font-family:var(--mono)">${note}</div></td>
+        <td>${provStatusBadge(p)}</td>
+        <td class="num">${rs ? gaugeHtml(rs, "req") : '<span class="faint">—</span>'}</td>
+        <td class="num">${ts ? gaugeHtml(ts, "tok") : '<span class="faint">—</span>'}</td>
+        <td class="num">${ss ? gaugeHtml(ss, "usd") : '<span class="faint">—</span>'}</td>
+        <td class="num">${resetInLabel(resetPer(st))}</td>
+        <td class="mini">${esc(st.last_used || "never")}</td>
+        <td style="text-align:right;white-space:nowrap">
+          <button class="sm" data-act="block" data-p="${esc(p.name)}">${p.blocked ? "✓ Unblock" : "⛔ Block"}</button>
+          <button class="sm ghost" data-act="reset" data-p="${esc(p.name)}">Reset</button>
+          <button class="sm primary" data-act="edit" data-p="${esc(p.name)}">Edit</button>
+        </td>
+      </tr>
+      <tr class="expand-row" id="exp-${i}" style="display:none"><td colspan="8">${det}</td></tr>`;
+  }).join("") || `<tr><td colspan="8"><div class="empty">no providers configured — add one with + Add provider, or set limits via Edit on a provider</div></td></tr>`;
+  $("#prov-count").textContent = `${list.length} of ${PROVIDERS.length} provider${PROVIDERS.length === 1 ? "" : "s"}`;
+
+  $$("#prov-rows [data-act]").forEach(btn => btn.onclick = async () => {
+    const name = btn.dataset.p, act = btn.dataset.act;
+    try {
+      if (act === "block") {
+        const p = PROVIDERS.find(x => x.name === name);
+        await api("/api/providers/" + encodeURIComponent(name), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ blocked: !p.blocked }) });
+        toast((p.blocked ? "Unblocked" : "Blocked") + ": " + name);
+        loadProviders();
+      } else if (act === "reset") {
+        if (!confirm("Reset usage counters for " + name + "?")) return;
+        await api("/api/providers/" + encodeURIComponent(name) + "/reset", { method: "POST" });
+        toast("Usage reset: " + name);
+        loadProviders();
+      } else if (act === "edit") {
+        openEditModal(PROVIDERS.find(x => x.name === name) || { name, note: "", limits: {}, status: {} });
+      }
+    } catch (e) { toast(e.message, true); }
+  });
+  $$("#prov-rows .expand-toggle").forEach(el => el.onclick = () => {
+    const tr = document.getElementById(el.dataset.toggle);
+    if (tr) tr.style.display = (tr.style.display === "none" ? "" : "none");
+  });
+}
+
+function openEditModal(p) {
+  const cur = p.limits || {};
+  const ov = document.createElement("div");
+  ov.className = "modal";
+  ov.innerHTML = `
+    <div class="modal-card">
+      <h3>${esc(p.name)}</h3>
+      <div class="sub">Budget limits let the router auto-skip this provider once a limit is reached. Limits merge per type.</div>
+      <div><label class="field">Note</label>
+        <textarea id="m-note" rows="2" placeholder="note…">${esc(p.note || "")}</textarea></div>
+      ${["requests", "tokens", "spend"].map(t => {
+        const c = cur[t] || {};
+        return `<div style="border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-top:10px">
+          <label class="switch"><input type="checkbox" id="m-${t}-on" ${c.per ? "checked" : ""}> <b style="text-transform:capitalize">${t}</b></label>
+          <div class="row-ctl" style="margin-top:8px">
+            <div style="max-width:150px"><label class="field">per</label>
+              <select id="m-${t}-per"><option value="day" ${c.per === "day" ? "selected" : ""}>day</option><option value="month" ${c.per === "month" ? "selected" : ""}>month</option><option value="total" ${c.per === "total" ? "selected" : ""}>total</option></select></div>
+            <div><label class="field">max</label><input type="number" id="m-${t}-max" step="any" min="0" placeholder="${t === "spend" ? "USD" : "count"}" value="${c.max != null ? c.max : ""}"></div>
+          </div>
+        </div>`;
+      }).join("")}
+      <div style="display:flex;gap:10px;margin-top:16px;align-items:center;justify-content:space-between;flex-wrap:wrap">
+        <button class="sm danger" id="m-del">Delete provider entry</button>
+        <div style="display:flex;gap:10px">
+          <button class="ghost" id="m-cancel">Cancel</button>
+          <button class="primary" id="m-save">Save</button>
+        </div>
+      </div>
+      <div class="hint" style="margin-top:8px">A checked limit with an empty max tracks usage without a cap. Already-configured limits keep their type even when unchecked (backend merges).</div>
+    </div>`;
+  const close = () => ov.remove();
+  ov.addEventListener("click", ev => { if (ev.target === ov) close(); });
+  $("#m-cancel", ov).onclick = close;
+  $("#m-del", ov).onclick = async () => {
+    if (!confirm("Delete provider entry " + p.name + "?")) return;
+    try {
+      await api("/api/providers/" + encodeURIComponent(p.name), { method: "DELETE" });
+      toast("Deleted: " + p.name);
+      close(); loadProviders();
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#m-save", ov).onclick = async () => {
+    const limits = {};
+    for (const t of ["requests", "tokens", "spend"]) {
+      if (!ov.querySelector("#m-" + t + "-on").checked) continue;
+      const conf = { per: ov.querySelector("#m-" + t + "-per").value };
+      const mx = parseFloat(ov.querySelector("#m-" + t + "-max").value);
+      if (Number.isFinite(mx) && mx >= 0) conf.max = mx;
+      limits[t] = conf;
+    }
+    try {
+      await api("/api/providers/" + encodeURIComponent(p.name), {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note: ov.querySelector("#m-note").value, limits })
+      });
+      toast("Saved: " + p.name);
+      close(); loadProviders();
+    } catch (e) { toast(e.message, true); }
+  };
+  document.body.appendChild(ov);
+  ov.querySelector("#m-note").focus();
+}
+
+function ovProviderRows(provs) {
+  if (!provs.length) return `<div class="empty"><a href="#/providers" style="color:var(--green)">No providers configured — add limits</a></div>`;
+  const day = p => ((p.usage || {}).day || {}).requests || 0;
+  const withLimits = provs.filter(p => Object.keys(p.limits || {}).length);
+  const top = withLimits.slice().sort((a, b) => day(b) - day(a)).slice(0, 4);
+  const list = top.length ? top : provs.slice(0, 4);
+  return list.map(p => {
+    const st = p.status || {};
+    const rs = st.requests;
+    const ex = p.blocked || (st.requests && st.requests.exhausted) || (st.tokens && st.tokens.exhausted) || (st.spend && st.spend.exhausted);
+    return `<div class="bar-row">
+      <span class="nm">${esc(p.name)}</span>
+      ${ex ? '<span class="badge bad">EXHAUSTED</span>' : ""}
+      <span class="gauge">${rs && rs.max != null ? gaugeHtml(rs, "req") : '<span class="faint" style="font-size:11px">no limit</span>'}</span>
+    </div>`;
+  }).join("");
+}
+
+/* ---------------------------------------------------------------- chains */
+
+function availMapFrom(providers) {
+  const m = {};
+  (providers || []).forEach(p => {
+    const st = p.status || {};
+    m[p.name] = {
+      blocked: !!p.blocked,
+      exhausted: !!(st.requests && st.requests.exhausted) || !!(st.tokens && st.tokens.exhausted) || !!(st.spend && st.spend.exhausted),
+      note: p.note || "",
+    };
+  });
+  return m;
+}
+
+function availDot(name) {
+  const a = CHAIN_AVAIL[name];
+  if (!a) return '<span class="dot" style="background:#565b66;width:5px;height:5px"></span>';
+  if (a.blocked || a.exhausted) return '<span class="dot bad" style="width:5px;height:5px"></span>';
+  return '<span class="dot ok" style="width:5px;height:5px"></span>';
+}
+
+function entryProvs(e) {
+  if (e.providers && e.providers.length) return e.providers;
+  if (e.provider && e.provider !== "auto") return [e.provider];
+  return [];
+}
+
+function chainFlowNode(e, i) {
+  const provs = entryProvs(e);
+  const chips = provs.length ? `<div class="chips" style="margin-top:4px">${provs.map(p => `<span class="chip">${availDot(p)}${esc(p)}</span>`).join("")}</div>` : "";
+  const autoTxt = provs.length ? "" : `<div class="p">@ auto</div>`;
+  if (e.type === "cheapest") {
+    return `<div class="chain-node"><div class="t">#${i + 1}</div><div class="m">★ cheapest ${esc(e.filter || "in watchlist")}</div>${chips || autoTxt}</div>`;
+  }
+  return `<div class="chain-node"><div class="t">#${i + 1}</div><div class="m">${esc(e.model)}</div>${chips || autoTxt}</div>`;
+}
+
+function chainEntryRow(c, ci, e, i) {
+  const provs = entryProvs(e);
+  const isCheap = e.type === "cheapest";
+  const label = isCheap ? `★ cheapest ${esc(e.filter || "in watchlist")}` : esc(e.model);
+  const chips = provs.length
+    ? `<span class="chips" style="margin-left:6px">${provs.map(p => `<span class="chip">${availDot(p)}${esc(p)}<span class="rm" data-act="chipdel" data-ci="${ci}" data-ei="${i}" data-p="${esc(p)}">✕</span></span>`).join("")}</span>`
+    : "";
+  return `<div class="chain-entry-row">
+    <span class="idx">${i + 1}</span>
+    <span class="grow mono" style="font-size:12.5px">
+      ${label}${chips}
+      <button class="sm ghost" style="margin-left:6px" data-act="provadd" data-ci="${ci}" data-ei="${i}" data-slug="${isCheap ? "" : esc(e.model)}">+ ${isCheap ? "restrict" : "provider"}</button>
+    </span>
+    <input class="entry-note" data-ci="${ci}" data-ei="${i}" placeholder="note…" value="${esc(e.note || "")}">
+    <button class="sm" data-act="up" data-ci="${ci}" data-ei="${i}" ${i === 0 ? "disabled" : ""}>↑</button>
+    <button class="sm" data-act="down" data-ci="${ci}" data-ei="${i}" ${i === c.entries.length - 1 ? "disabled" : ""}>↓</button>
+    <button class="sm danger" data-act="del" data-ci="${ci}" data-ei="${i}">✕</button>
+  </div>`;
+}
+
+async function viewChains() {
+  try {
+    const pr = await api("/api/providers");
+    CHAIN_AVAIL = availMapFrom(pr.providers || []);
+  } catch (e) { CHAIN_AVAIL = {}; }
+  $("#view").innerHTML = `
+    <div class="page-head">
+      <div><h1>Fallback chains</h1><div class="sub">Ordered pipelines. The primary chain drives your config; the engine walks it top → bottom and uses the first healthy step. Provider chips on a step = hard preference (first available one wins).</div></div>
       <button class="primary" id="btn-newchain">+ New chain</button>
     </div>
     <div id="chains-list"></div>`;
@@ -400,26 +878,25 @@ function viewChains() {
       renderChains();
     } catch (e) { toast(e.message, true); }
   };
+  document.addEventListener("click", function chClose(ev) {
+    if (!ev.target.closest(".chain-entry-row")) {
+      $$("#chains-list .chain-entry-row .ac-list.show").forEach(d => d.remove());
+      document.removeEventListener("click", chClose);
+    }
+  });
 }
 
 function renderChains() {
   $("#chains-list").innerHTML = CHAINS.map((c, ci) => `
     <div class="panel">
       <h2>${esc(c.name)} ${c.primary ? '<span class="badge ok">PRIMARY</span>' : ""} ${c.auto_apply ? '<span class="badge info">auto-apply</span>' : '<span class="badge warn">manual</span>'}</h2>
-      <div class="chain-flow">${c.entries.length ? c.entries.map((e, i) => {
-        const m = e.type === "cheapest" ? "cheapest in watchlist" : esc(e.model);
-        const p = e.type === "cheapest" ? "auto" : esc(e.provider || "auto");
-        return `<div class="chain-node"><div class="t">#${i + 1}</div><div class="m">${m}</div><div class="p">@ ${p}</div></div>` +
-          (i < c.entries.length - 1 ? '<span class="chain-arrow">→</span>' : "");
-      }).join("") : '<span class="empty">No entries yet — add one below.</span>'}</div>
-      <div style="margin-top:10px">${c.entries.map((e, i) => `
-        <div class="chain-entry-row">
-          <span class="idx">${i + 1}</span>
-          <span class="grow mono" style="font-size:12.5px">${e.type === "cheapest" ? "★ cheapest in watchlist" : esc(e.model) + " @ " + esc(e.provider || "auto")}</span>
-          <button class="sm" data-act="up" data-ci="${ci}" data-ei="${i}" ${i === 0 ? "disabled" : ""}>↑</button>
-          <button class="sm" data-act="down" data-ci="${ci}" data-ei="${i}" ${i === c.entries.length - 1 ? "disabled" : ""}>↓</button>
-          <button class="sm danger" data-act="del" data-ci="${ci}" data-ei="${i}">✕</button>
-        </div>`).join("")}</div>
+      <div class="chain-note-wrap" data-ci="${ci}">
+        ${c.note ? `<textarea class="chain-note" data-ci="${ci}" rows="2" placeholder="Add a note…">${esc(c.note)}</textarea>`
+                 : `<button class="sm ghost" data-act="noteadd" data-ci="${ci}">+ Add a note…</button>`}
+      </div>
+      <div class="chain-flow">${c.entries.length ? c.entries.map((e, i) => chainFlowNode(e, i) +
+            (i < c.entries.length - 1 ? '<span class="chain-arrow">→</span>' : "")).join("") : '<span class="empty">No entries yet — add one below.</span>'}</div>
+      <div style="margin-top:10px">${c.entries.map((e, i) => chainEntryRow(c, ci, e, i)).join("")}</div>
       <div class="row-ctl" style="margin-top:12px">
         <div><label class="field">Add step — model</label>
           <div class="autocomplete"><input id="ac-${ci}" placeholder="search models…">
@@ -437,6 +914,63 @@ function renderChains() {
     </div>`).join("");
 
   $$("#chains-list [data-act]").forEach(b => b.onclick = () => chainAction(b.dataset));
+
+  $$("#chains-list .chain-note").forEach(ta => {
+    ta.onblur = async () => {
+      const c = CHAINS[+ta.dataset.ci];
+      if (c.note === ta.value) return;
+      c.note = ta.value;
+      try {
+        await api("/api/chains/" + encodeURIComponent(c.name), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(c) });
+        toast("Note saved");
+        CHAINS = (await api("/api/chains")).chains;
+        renderChains();
+      } catch (e) { toast(e.message, true); }
+    };
+  });
+
+  $$("#chains-list .entry-note").forEach(inp => {
+    inp.onchange = async () => {
+      const c = CHAINS[+inp.dataset.ci];
+      c.entries[+inp.dataset.ei].note = inp.value;
+      await saveChain(c);
+    };
+  });
+
+  $$("#chains-list [data-act='provadd']").forEach(btn => {
+    btn.onclick = async () => {
+      const ci = +btn.dataset.ci, ei = +btn.dataset.ei;
+      const row = btn.closest(".chain-entry-row");
+      closeProvDropdowns();
+      let items = [];
+      if (btn.dataset.slug) {
+        const d = await api("/api/endpoints/" + encodeURIComponent(btn.dataset.slug)).catch(() => null);
+        if (d) items = (d.endpoints || []).filter(e => e && !e.error).map(e => ({
+          name: e.provider, dot: e.available ? "ok" : "bad", sub: fmt(e.blended) + " $/M"
+        }));
+      } else {
+        items = Object.entries(CHAIN_AVAIL).map(([n, a]) => ({
+          name: n, dot: (a.blocked || a.exhausted) ? "bad" : "ok", sub: a.note || ""
+        }));
+      }
+      if (!row || !items.length) { toast("no provider options", true); return; }
+      const dd = document.createElement("div");
+      dd.className = "ac-list show";
+      dd.style.cssText = "position:absolute;top:100%;left:0;min-width:240px;z-index:45";
+      dd.innerHTML = items.map(it =>
+        `<div class="ac-item" data-p="${esc(it.name)}"><span class="n"><span class="dot ${it.dot}"></span> ${esc(it.name)}</span><div class="d">${esc(it.sub)}</div></div>`).join("");
+      dd.querySelectorAll(".ac-item").forEach(it => it.onclick = async () => {
+        const c = CHAINS[ci];
+        const entry = c.entries[ei];
+        entry.providers = entry.providers || [];
+        if (!entry.providers.includes(it.dataset.p)) entry.providers.push(it.dataset.p);
+        await saveChain(c);
+        toast("Provider preference set");
+      });
+      row.style.position = "relative";
+      row.appendChild(dd);
+    };
+  });
 
   CHAINS.forEach((c, ci) => {
     const input = $("#ac-" + ci), list = $("#acl-" + ci), sel = $("#prov-" + ci);
@@ -461,7 +995,8 @@ function renderChains() {
     $("#add-" + ci).onclick = async () => {
       const slug = input.value.trim();
       if (!slug) { toast("Pick a model first", true); return; }
-      const e = { type: "model", model: slug, provider: sel.value };
+      const e = { type: "model", model: slug };
+      if (sel.value !== "auto") e.providers = [sel.value];
       c.entries.push(e);
       await saveChain(c);
       toast("Step added");
@@ -477,6 +1012,10 @@ function renderChains() {
       renderChains();
     };
   });
+}
+
+function closeProvDropdowns() {
+  $$("#chains-list .chain-entry-row .ac-list.show").forEach(dd => dd.remove());
 }
 
 async function fillProviders(ci, slug) {
@@ -502,6 +1041,23 @@ async function chainAction(d) {
   if (d.act === "del") {
     c.entries.splice(+d.ei, 1);
     await saveChain(c);
+  } else if (d.act === "chipdel") {
+    const e = c.entries[+d.ei];
+    e.providers = (e.providers || []).filter(x => x !== d.p);
+    if (e.provider && e.provider !== "auto" && e.provider === d.p) delete e.provider;
+    await saveChain(c);
+  } else if (d.act === "noteadd") {
+    const wrap = document.querySelector(`.chain-note-wrap[data-ci="${d.ci}"]`);
+    if (!wrap) return;
+    wrap.innerHTML = `<textarea class="chain-note" data-ci="${d.ci}" rows="2" placeholder="Add a note…"></textarea>`;
+    const ta = wrap.querySelector("textarea");
+    ta.focus();
+    ta.onblur = async () => {
+      const cc = CHAINS[+d.ci];
+      cc.note = ta.value;
+      await saveChain(cc);
+      toast("Note saved");
+    };
   } else if (d.act === "up") {
     [c.entries[+d.ei - 1], c.entries[+d.ei]] = [c.entries[+d.ei], c.entries[+d.ei - 1]];
     await saveChain(c);
@@ -745,12 +1301,23 @@ function viewModels() {
       </div></div>
     <div class="panel"><h2>${MODELS.length} models</h2>
       <table><thead><tr><th>Slug</th><th>Note</th><th></th></tr></thead>
-      <tbody>${MODELS.map(m => `<tr><td class="mono">${esc(m.slug)}</td><td class="muted">${esc(m.note || "")}</td>
+      <tbody>${MODELS.map(m => `<tr><td class="mono">${esc(m.slug)}</td>
+        <td style="min-width:260px"><input class="note-inline" data-slug="${esc(m.slug)}" placeholder="note…" value="${esc(m.note || "")}"></td>
         <td><button class="sm danger" data-slug="${esc(m.slug)}">remove</button></td></tr>`).join("")}</tbody></table></div>`;
   $$("#view button[data-slug]").forEach(b => b.onclick = async () => {
     await api("/api/models/" + encodeURIComponent(b.dataset.slug), { method: "DELETE" });
     MODELS = (await api("/api/models")).models;
     toast("Removed from watchlist");
+    viewModels();
+  });
+  $$("#view .note-inline").forEach(inp => inp.onchange = async () => {
+    const slug = inp.dataset.slug, note = inp.value;
+    try {
+      try { await api("/api/models/" + encodeURIComponent(slug), { method: "DELETE" }); } catch (e) {}
+      await api("/api/models", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ slug, note }) });
+      toast("Note saved: " + slug);
+    } catch (e) { toast(e.message, true); }
+    MODELS = (await api("/api/models")).models;
     viewModels();
   });
   (async () => {
@@ -845,7 +1412,7 @@ function viewEvents() {
 
 /* ---------------------------------------------------------------- router */
 
-const VIEWS = { overview: viewOverview, ranking: viewRanking, chains: viewChains, api: viewApi, chat: viewChat, models: viewModels, settings: viewSettings, events: viewEvents };
+const VIEWS = { overview: viewOverview, ranking: viewRanking, catalog: viewCatalog, chains: viewChains, providers: viewProviders, api: viewApi, chat: viewChat, models: viewModels, settings: viewSettings, events: viewEvents };
 
 function route() {
   const name = (location.hash.replace("#/", "") || "overview");

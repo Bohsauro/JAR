@@ -188,8 +188,28 @@ def remove_model(slug: str) -> bool:
     return len(models) < n
 
 
+def normalize_chain(entry: dict) -> dict:
+    """v2 entry normalization: legacy single-`provider` → `providers` list."""
+    if not isinstance(entry, dict):
+        return entry
+    entry = dict(entry)
+    if "provider" in entry and "providers" not in entry:
+        p = entry["provider"]
+        entry["providers"] = [p] if isinstance(p, str) and p else []
+        entry.pop("provider", None)
+    return entry
+
+
 def load_chains() -> list:
-    return _read_json(CHAINS_FILE, DEFAULT_CHAINS)
+    chains = _read_json(CHAINS_FILE, DEFAULT_CHAINS)
+    if not isinstance(chains, list):
+        return DEFAULT_CHAINS
+    out = []
+    for c in chains:
+        c = dict(c)
+        c["entries"] = [normalize_chain(e) for e in (c.get("entries") or [])]
+        out.append(c)
+    return out
 
 
 def save_chains(chains: list):

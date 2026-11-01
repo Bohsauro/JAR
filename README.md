@@ -53,6 +53,10 @@ PennyRoute measures, ranks, and switches — automatically.
 - **It *is* the API** — OpenAI-compatible `/v1/chat/completions` + `/v1/models` with its own API keys. Point the `openai` SDK, LangChain, Aider, Cursor, Claude Code, or anything at PennyRoute, and every request is served by the cheapest healthy provider *at that moment*. Streaming included, per-request failover included.
 - **Built-in Chat** — paste your PennyRoute key in the WebUI and talk to the router from any device on the network. Shows exactly which model served each reply.
 - **Preset watchlists** — one-click `frugal` (flash-class), `balanced` (mid + coding), `premium` (Opus/Sonnet/GPT/Gemini — still routed to the cheapest healthy provider), `free` (`:free` only).
+- **v2.0 — full classified catalog** — browse every OpenRouter model by tier (free/ budget/ value/ mid/ premium/ ultra), family and tag, with facet counts, price / context sorting, and bulk "add all filtered" to your watchlist.
+- **v2.0 — provider budgets & usage tracking** — set per-provider `requests` / `tokens` / `spend` limits (day / month / total). Exhausted or blocked providers are auto-skipped by the router, and remaining gauges update live.
+- **v2.0 — multi-provider ordered chain steps** — pin an ordered list of providers to any chain step (first available + healthy wins, step skipped if none) or restrict the cheapest pick to specific providers.
+- **v2.0 — per-provider GUI** — block/unblock, reset usage, edit limits and notes, plus day / month / total usage windows with remaining gauges.
 - **WebUI** — live routing telemetry (trends, donut, cost ladder), ranking with provider drill-down, chain editor, key management, search across the full OpenRouter catalog, settings, event log.
 - **Hermes Agent native** — writes `model.default` + `provider_routing.order` (as a *real YAML list* — not the string that silently breaks the pin) into `~/.hermes/config.yaml`.
 

@@ -110,8 +110,68 @@ def fetch_endpoints_raw(slug: str, force: bool = False) -> list | dict:
     return raw
 
 
+# Catalog classification (spec 1.3). Ordered: first tag match wins.
+TAG_RULES = [
+    ("reasoning", ["r1", "o1", "o3", "o4", "thinking", "reasoner"]),
+    ("coding",    ["code", "coder"]),
+    ("vision",    ["vision", " vl", "multimodal"]),
+    ("embedding", ["embed", "ada"]),
+    ("image",     ["image", "dall-e", "flux", "sdxl", "stable-diffusion", "pixel"]),
+    ("audio",     ["audio", "whisper", "tts", "speech", "music"]),
+    ("agent",     ["agent"]),
+]
+
+
+def _tier(in_pm):
+    """Tier from prompt $/M (missing price → unknown)."""
+    if in_pm is None:
+        return "unknown"
+    if in_pm <= 0:
+        return "free"
+    if in_pm < 0.5:
+        return "budget"
+    if in_pm < 1.5:
+        return "value"
+    if in_pm < 5:
+        return "mid"
+    if in_pm < 15:
+        return "premium"
+    return "ultra"
+
+
+def _tags(mid: str, name: str) -> list:
+    hay = ((mid or "") + " " + (name or "")).lower()
+    for tag, needles in TAG_RULES:
+        for n in needles:
+            if n in hay:
+                return [tag]
+    return []
+
+
+def _catalog_entry(m) -> dict:
+    mid = m.get("id") or ""
+    name = m.get("name") or ""
+    pr = m.get("pricing") or {}
+    in_t = _g(pr.get("prompt"))
+    in_pm = (in_t * 1e6) if in_t is not None else None
+    out_t = _g(pr.get("completion"))
+    out_pm = (out_t * 1e6) if out_t is not None else None
+    return {
+        "id": mid,
+        "name": name,
+        "in": in_t,
+        "out": out_t,
+        "ctx": m.get("context_length"),
+        "family": mid.split("/")[0] if mid else "",
+        "tier": _tier(in_pm),
+        "tags": _tags(mid, name),
+        "in_$M": in_pm,
+        "out_$M": out_pm,
+    }
+
+
 def fetch_catalog(force: bool = False) -> list | dict:
-    """Full model catalog (id, name, list pricing). Used for the model search box."""
+    """Full model catalog (id, name, list pricing, family/tier/tags)."""
     now = time.time()
     with _lock:
         hit = _cache.get("catalog")
@@ -121,16 +181,7 @@ def fetch_catalog(force: bool = False) -> list | dict:
     if "__error" in data:
         out = {"error": data["__error"]}
     else:
-        out = []
-        for m in data.get("data") or []:
-            pr = m.get("pricing") or {}
-            out.append({
-                "id": m.get("id"),
-                "name": m.get("name"),
-                "in": _g(pr.get("prompt")),
-                "out": _g(pr.get("completion")),
-                "ctx": m.get("context_length"),
-            })
+        out = [_catalog_entry(m) for m in (data.get("data") or [])]
     with _lock:
         _cache["catalog"] = {"ts": now, "data": out}
     return out

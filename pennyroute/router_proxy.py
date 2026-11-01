@@ -11,21 +11,29 @@ Request model field routing rules:
 """
 
 import json
+import re
 import time
 
 import httpx
 from fastapi import HTTPException, Request
 
-from . import orclient, ranking
+from . import orclient, providers, ranking
 from . import store
+
+
+def _prov_ok(name: str) -> bool:
+    """Shared availability gate (spec 1.4): same as ranking.resolve_chain."""
+    return bool(providers.is_available(name).get("available"))
 
 
 def build_candidates(chain: dict, settings: dict) -> list[dict]:
     """Ordered candidate list for a chain: [(model, provider), ...].
 
-    Within a chain step, all healthy endpoints of the target model are added
-    (cheapest first) so a provider error tries the next provider of the SAME
-    model before falling through to the next chain step.
+    Within a chain step, all eligible (healthy + available) endpoints of the
+    target model are added (cheapest first) so a provider error or exhaustion
+    tries the next provider of the SAME model before falling through to the
+    next chain step. `model` entries with `providers` add one candidate per
+    provider in order (first available+healthy wins at forward time).
     """
     mix = settings["mix"]
     gates = {"min_tps": settings["min_tps"], "min_uptime": settings["min_uptime"]}
@@ -42,28 +50,35 @@ def build_candidates(chain: dict, settings: dict) -> list[dict]:
     for entry in chain.get("entries") or []:
         if entry.get("type") == "cheapest":
             flt = entry.get("filter") or ""
-            pool = [m for m in ranked if flt in m["slug"]] if flt else ranked
-            # healthy, cheapest blended first
+            restrict = entry.get("providers")
+            pool = [m for m in ranked if (not flt or flt in m["slug"])]
             for m in pool:
                 b = m.get("best")
-                if b and b.get("healthy"):
-                    add(m["slug"], b["provider"])
+                if not b or not b.get("healthy"):
+                    continue
+                if not _prov_ok(b["provider"]):
+                    continue
+                if restrict and b["provider"] not in restrict:
+                    continue
+                add(m["slug"], b["provider"])
         else:
             slug = entry.get("model")
             if not slug:
                 continue
-            want = entry.get("provider") or "auto"
             eps = [e for e in ranking.rank_endpoints(slug, mix, gates)
                    if not (isinstance(e, dict) and "error" in e)]
-            healthy = [e for e in eps if e["healthy"]]
-            if want != "auto":
-                pinned = [e for e in healthy if e["provider"] == want]
-                if pinned:
-                    add(slug, want)
-                # if the pinned provider is down, fall through to next step
+            provs = entry.get("providers")
+            if provs:
+                # ordered preference: one candidate per available+healthy provider
+                for pname in provs:
+                    if _prov_ok(pname) and any(
+                            e["provider"] == pname and e["healthy"] for e in eps):
+                        add(slug, pname)
             else:
-                for e in healthy:
-                    add(slug, e["provider"])
+                # auto: all healthy, available endpoints
+                for e in eps:
+                    if e["healthy"] and _prov_ok(e["provider"]):
+                        add(slug, e["provider"])
     return out
 
 
@@ -113,10 +128,21 @@ async def _forward(request: Request, body: dict, candidates: list[dict]):
     stream = bool(body.get("stream"))
 
     for cand in candidates:
+        pname = cand.get("provider")
+        # race guard (spec 1.5): providers may have just exhausted
+        if pname:
+            av = providers.is_available(pname)
+            if not av["available"]:
+                store.log_event("proxy_skip", {
+                    "model": cand["model"], "provider": pname,
+                    "reasons": av["reasons"]})
+                last_error = (f"provider unavailable: {pname} "
+                              f"({', '.join(av['reasons'])})")
+                continue
         payload = dict(body)
         payload["model"] = cand["model"]
-        if cand["provider"]:
-            payload["provider"] = {"order": [cand["provider"]],
+        if pname:
+            payload["provider"] = {"order": [pname],
                                    "allow_fallbacks": False}
         headers = {
             "Authorization": f"Bearer {orclient.get_key()}",
@@ -132,9 +158,12 @@ async def _forward(request: Request, body: dict, candidates: list[dict]):
                 if raw.status_code >= 400:
                     await raw.aclose()
                     await client.aclose()
-                    last_error = f"{raw.status_code} @ {cand['model']}/{cand['provider']}"
+                    last_error = f"{raw.status_code} @ {cand['model']}/{pname}"
                     continue
-                return StreamingResp(raw, client)
+                return StreamingResp(
+                    _wrap_stream(raw, cand["model"], pname), client,
+                    status_code=raw.status_code, headers=dict(raw.headers),
+                    media_type=raw.headers.get("content-type"))
             else:
                 async with httpx.AsyncClient(
                         timeout=httpx.Timeout(10.0, read=600.0)) as client:
@@ -142,19 +171,78 @@ async def _forward(request: Request, body: dict, candidates: list[dict]):
                         "https://openrouter.ai/api/v1/chat/completions",
                         content=json.dumps(payload).encode(), headers=headers)
                 if raw.status_code >= 400:
-                    last_error = f"{raw.status_code} @ {cand['model']}/{cand['provider']}"
+                    last_error = f"{raw.status_code} @ {cand['model']}/{pname}"
                     continue
                 data = raw.json()
                 data.setdefault("pennyroute", {
-                    "served_by": f"{cand['model']} @ {cand['provider']}",
+                    "served_by": f"{cand['model']} @ {pname}",
                     "chain_tried": len(candidates)})
+                # record usage + remaining headroom for this provider
+                if pname:
+                    providers.record_usage(pname, cand["model"], data.get("usage"))
+                    data["pennyroute"]["provider_usage"] = _provider_usage_summary(pname)
                 return data
         except Exception as e:  # noqa: BLE001
-            last_error = f"{type(e).__name__}: {e} @ {cand['model']}/{cand['provider']}"
+            last_error = f"{type(e).__name__}: {e} @ {cand['model']}/{pname}"
             continue
 
     store.log_event("proxy_error", {"error": last_error})
     raise HTTPException(502, f"all chain candidates failed; last: {last_error}")
+
+
+_TAIL_BYTES = 65536
+
+
+def _usage_from_tail(tail: str):
+    """Best-effort extraction of the last OpenAI usage object (may contain
+    nested objects, e.g. prompt_tokens_details — use brace balancing)."""
+    idx = tail.rfind('"usage"')
+    if idx < 0:
+        return None
+    start = tail.find("{", idx)
+    if start < 0:
+        return None
+    depth = 0
+    for i in range(start, len(tail)):
+        c = tail[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    u = json.loads(tail[start:i + 1])
+                except (ValueError, json.JSONDecodeError):
+                    return None
+                return u if isinstance(u, dict) else None
+    return None
+
+
+def _provider_usage_summary(name: str) -> dict:
+    """Small per-limit summary (pct + remaining) for pennyroute.provider_usage."""
+    st = providers.limits_status(name)
+    out = {}
+    for t in ("requests", "tokens", "spend"):
+        v = st.get(t)
+        if isinstance(v, dict):
+            out[t] = {"per": v.get("per"), "pct": v.get("pct"),
+                      "remaining": v.get("remaining")}
+    return out
+
+
+async def _wrap_stream(raw, model: str, provider: str):
+    """Buffer a 64 KB rolling tail; record usage at end. No injection (keeps stream byte-pure)."""
+    tail = ""
+    try:
+        async for chunk in raw.aiter_bytes():
+            text = chunk.decode("utf-8", errors="ignore")
+            tail = (tail + text)[-_TAIL_BYTES:]
+            yield text.encode("utf-8")
+    finally:
+        try:
+            providers.record_usage(provider, model, _usage_from_tail(tail))
+        except Exception:  # noqa: BLE001 — usage is best effort
+            pass
 
 
 from fastapi.responses import StreamingResponse  # noqa: E402
@@ -163,11 +251,11 @@ from fastapi.responses import StreamingResponse  # noqa: E402
 class StreamingResp(StreamingResponse):
     """StreamingResponse that owns the httpx client and closes it after."""
 
-    def __init__(self, raw, client: httpx.AsyncClient):
+    def __init__(self, aiter, client: httpx.AsyncClient, status_code=200,
+                 headers=None, media_type=None):
         self._client = client
-        super().__init__(raw.aiter_bytes(), status_code=raw.status_code,
-                         headers=dict(raw.headers),
-                         media_type=raw.headers.get("content-type"))
+        super().__init__(aiter, status_code=status_code, headers=headers,
+                         media_type=media_type)
 
     async def stream_response(self, send):
         try:

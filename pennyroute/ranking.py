@@ -14,6 +14,7 @@ whole watchlist.
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import orclient
+from . import providers
 from . import store
 
 
@@ -81,19 +82,40 @@ def rank_models(models: list, mix: dict, gates: dict, force: bool = False) -> li
     return out
 
 
-def resolve_chain(chain: dict, ranked: list, mix: dict, gates: dict) -> dict | None:
+def _default_provider_ok(name: str):
+    """Shared availability check (spec 1.4): same function for engine + proxy."""
+    return bool(providers.is_available(name).get("available"))
+
+
+def resolve_chain(chain: dict, ranked: list, mix: dict, gates: dict,
+                  provider_ok=None) -> dict | None:
     """Walk a fallback chain; return the first healthy entry resolved.
 
     Returns {'index', 'type', 'model', 'provider', 'blended', 'reason'} or None
     if nothing healthy was found.
+
+    `provider_ok(name)` filters providers by availability; defaults to the
+    shared `providers.is_available` so the engine never resolves to an
+    exhausted/blocked provider.
     """
+    if provider_ok is None:
+        provider_ok = _default_provider_ok
+
+    def _ep_ok(ep):
+        return bool(ep and ep.get("healthy")) and bool(provider_ok(ep.get("provider")))
+
     for i, entry in enumerate(chain.get("entries") or []):
         if entry.get("type") == "cheapest":
             flt = entry.get("filter") or ""
-            pool = [m for m in ranked if flt in m["slug"]] if flt else ranked
+            restrict = entry.get("providers")
+            pool = [m for m in ranked if (not flt or flt in m["slug"])]
             for m in pool:
                 b = m.get("best")
-                if b and b.get("healthy"):
+                if not b:
+                    continue
+                if restrict and b.get("provider") not in restrict:
+                    continue
+                if _ep_ok(b):
                     return {"index": i, "type": "cheapest",
                             "model": m["slug"], "provider": b["provider"],
                             "blended": b["blended"],
@@ -103,24 +125,24 @@ def resolve_chain(chain: dict, ranked: list, mix: dict, gates: dict) -> dict | N
         slug = entry.get("model")
         if not slug:
             continue
-        want = entry.get("provider") or "auto"
+        provs = entry.get("providers")
+        if provs:
+            # ordered hard preference: first available+healthy provider wins
+            rows = rank_endpoints(slug, mix, gates)
+            rows = [r for r in rows if not (isinstance(r, dict) and "error" in r)]
+            for n, pname in enumerate(provs, start=1):
+                match = next((r for r in rows
+                              if r.get("provider") == pname and _ep_ok(r)), None)
+                if match:
+                    return {"index": i, "type": "model", "model": slug,
+                            "provider": pname, "blended": match["blended"],
+                            "reason": f"provider #{n} in step order"}
+            continue  # none available -> whole step skipped, chain continues
+
+        # auto: cheapest healthy endpoint across all providers (unchanged)
         best = _best_endpoint(slug, mix, gates)
         b = best.get("best")
-        if not b:
-            continue
-        if want != "auto":
-            # fixed provider: must be present and healthy
-            match = next((r for r in [b] if r["provider"] == want), None)
-            if not match or not match["healthy"]:
-                # look it up in the full list to confirm health
-                match = next((r for r in rank_endpoints(slug, mix, gates)
-                              if r["provider"] == want and r["healthy"]), None)
-            if not match:
-                continue
-            return {"index": i, "type": "model", "model": slug,
-                    "provider": want, "blended": match["blended"],
-                    "reason": "entry healthy"}
-        if b["healthy"]:
+        if _ep_ok(b):
             return {"index": i, "type": "model", "model": slug,
                     "provider": b["provider"], "blended": b["blended"],
                     "reason": f"cheapest healthy endpoint for {slug}"}

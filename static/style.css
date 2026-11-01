@@ -398,6 +398,81 @@ label.field {
 .ac-item .n { font-family: var(--mono); }
 .ac-item .d { color: var(--faint); font-size: 12px; }
 
+/* ————— v2: chips / gauges / facets / modal / bars ————— */
+.chips { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 11.5px;
+  background: var(--panel-hi); border: 1px solid var(--border);
+  border-radius: 999px; padding: 2px 9px; color: var(--text-2); white-space: nowrap;
+}
+.chip .dot { width: 5px; height: 5px; }
+.chip .rm { cursor: pointer; color: var(--faint); margin-left: 2px; }
+.chip .rm:hover { color: var(--red); }
+
+.facets { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.facet {
+  font-family: var(--mono); font-size: 12px; cursor: pointer; user-select: none;
+  border: 1px solid var(--border); background: var(--panel);
+  color: var(--muted); border-radius: 999px; padding: 5px 12px;
+  transition: border-color .12s ease, color .12s ease, background .12s ease;
+}
+.facet:hover { border-color: var(--border-hi); color: var(--text); }
+.facet.on { border-color: var(--green); color: var(--green); background: var(--green-dim); }
+.facet .n { color: var(--faint); margin-left: 5px; }
+.facet.on .n { color: var(--green); }
+
+.gauge { min-width: 120px; }
+.g-top { display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.g-bar { height: 4px; border-radius: 2px; background: rgba(255,255,255,.08); margin: 4px 0; overflow: hidden; }
+.g-bar span { display: block; height: 100%; border-radius: 2px; }
+.g-bot { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
+
+.bar-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,.04); }
+.bar-row:last-child { border-bottom: none; }
+.bar-row .nm { font-weight: 500; font-size: 12.5px; min-width: 88px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-row .gauge { flex: 1 1 auto; min-width: 90px; }
+.bar-row .rem { font-family: var(--mono); font-size: 11px; color: var(--faint); flex: none; }
+
+.modal {
+  position: fixed; inset: 0; z-index: 90;
+  background: rgba(9,9,11,.72); backdrop-filter: blur(5px);
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.modal-card {
+  width: 640px; max-width: 100%; max-height: 88vh; overflow: auto;
+  background: var(--bg2); border: 1px solid var(--border-hi); border-radius: var(--radius-lg);
+  padding: 22px 26px; box-shadow: 0 24px 70px rgba(0,0,0,.6);
+}
+.modal-card h3 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
+.modal-card .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 14px; }
+
+/* catalog */
+.cat-toolbar { display: flex; flex-direction: column; gap: 12px; margin-bottom: 14px; }
+.expand-row > td { background: var(--panel-hi); }
+.detail-box { padding: 12px 6px; }
+
+/* tier badges */
+.badge.tier-free    { background: var(--green-dim); color: var(--green); }
+.badge.tier-budget  { background: var(--blue-dim); color: var(--blue); }
+.badge.tier-value   { background: rgba(45,212,191,.14); color: #2dd4bf; }
+.badge.tier-mid     { background: var(--amber-dim); color: var(--amber); }
+.badge.tier-premium { background: rgba(251,146,60,.15); color: #fb923c; }
+.badge.tier-ultra   { background: var(--red-dim); color: var(--red); }
+.badge.tier-unknown { background: var(--panel-2); color: var(--text-2); }
+
+textarea {
+  background: var(--bg2); color: var(--text);
+  border: 1px solid var(--border-hi); border-radius: 6px;
+  padding: 7px 11px; font-size: 13px; font-family: var(--sans);
+  outline: none; resize: vertical;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+textarea:focus { border-color: rgba(62,207,142,.5); box-shadow: 0 0 0 3px rgba(62,207,142,.1); }
+.chain-note { width: 100%; min-height: 44px; font-size: 12.5px; margin: 2px 0 8px; }
+.entry-note { width: 170px; font-size: 12px; padding: 4px 8px; }
+.note-inline { font-size: 12.5px; padding: 5px 9px; font-family: var(--mono); }
+
 .mono { font-family: var(--mono); }
 .muted { color: var(--muted); }
 .faint { color: var(--faint); }
