@@ -231,16 +231,17 @@ def _provider_usage_summary(name: str) -> dict:
 
 
 async def _wrap_stream(raw, model: str, provider: str):
-    """Buffer a 64 KB rolling tail; record usage at end. No injection (keeps stream byte-pure)."""
-    tail = ""
+    """Buffer a 64 KB rolling tail; record usage at end. Chunks pass through
+    untouched: decoding per chunk would drop multibyte chars split across two."""
+    tail = b""
     try:
         async for chunk in raw.aiter_bytes():
-            text = chunk.decode("utf-8", errors="ignore")
-            tail = (tail + text)[-_TAIL_BYTES:]
-            yield text.encode("utf-8")
+            tail = (tail + chunk)[-_TAIL_BYTES:]
+            yield chunk
     finally:
         try:
-            providers.record_usage(provider, model, _usage_from_tail(tail))
+            providers.record_usage(provider, model, _usage_from_tail(
+                tail.decode("utf-8", errors="ignore")))
         except Exception:  # noqa: BLE001 — usage is best effort
             pass
 

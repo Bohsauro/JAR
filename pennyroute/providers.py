@@ -97,9 +97,14 @@ def remove_provider(name: str) -> bool:
 
 
 def load_usage() -> dict:
+    """Usage per provider. Expired day/month windows read as blank, so an
+    exhausted provider frees up when its window rolls over."""
     with _lock:
         u = _read_json(USAGE_FILE, {})
-        return u if isinstance(u, dict) else {}
+        if not isinstance(u, dict):
+            return {}
+        return {name: {per: _rotated(ent.get(per), per) for per in WINDOWS}
+                for name, ent in u.items() if isinstance(ent, dict)}
 
 
 def save_usage(u: dict) -> None:
