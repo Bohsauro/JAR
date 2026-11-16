@@ -1,0 +1,41 @@
+name: Bug report
+description: Something in JAR doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Create a chain with ...
+        2. Send a request with model "penny" ...
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How do you run JAR?
+      options:
+        - install.sh (systemd)
+        - Docker
+        - Manual (uvicorn)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v2.0.0 or a commit hash
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant lines from the server output or data/events.jsonl. Remove API keys and tokens first.
+      render: text

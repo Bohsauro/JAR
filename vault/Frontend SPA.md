@@ -11,7 +11,7 @@ Vanilla JS, nessun framework, nessun build, nessun `npm`. Tre file:
 
 | File | Righe | Ruolo |
 |---|---|---|
-| `static/index.html` | 35 | Guscio: sidebar con `#nav`, `#view`, `#toasts` |
+| `static/index.html` | 33 | Guscio: barra in alto con wordmark JAR, `#nav` (link `<a href="#/vista">`), `#routing-now`; poi `#view`, `#toasts` |
 | `static/app.js` | 1442 | Tutta la logica: router, stato, viste, chiamate API |
 | `static/style.css` | 482 | Design system |
 
@@ -74,21 +74,24 @@ Il timer dell'Overview non viene fermato quando si cambia pagina. Vedi [[Insidie
 
 ## Design system (`style.css`)
 
-"High-End Developer Tool": tela ultra-scura, accento verde, numeri in mono, pannelli traslucidi con bordi sottili. Token in `:root` (righe 6–33):
+Rifatto il 2026-11-16 col rebrand **JAR — Just Another Router**. Direzione chiara "banco da laboratorio": carta grigio-blu, superfici bianche, inchiostro. Il cobalto segna ciò che è cliccabile, l'ottone (il coperchio del barattolo) è riservato ai soldi (`.pnum`, valore blended), verde/ambra/rosso solo per lo stato di salute.
 
 ```css
---bg: #09090b;  --green: #3ecf8e;  --amber: #ffbc33;  --red: #ff6363;  --blue: #55b3ff;
---panel: rgba(255,255,255,.02);  --border: rgba(255,255,255,.06);
---radius: 8px;  --radius-lg: 12px;
---sans: "Hanken Grotesk", ...;  --mono: "Hanken Grotesk Mono", ...;
+--paper: #eceef1;  --surface: #fff;  --ink: #16191e;  --line: #d6dae0;
+--cobalt: #2b45e0;  --brass: #a87a12;  --ok: #0e7a55;  --warn: #a96300;  --bad: #c0352c;
+--sans: "Bricolage Grotesque";  --mono: "IBM Plex Mono";   /* caricati da index.html */
 ```
 
-Componenti esistenti da riusare: `.panel`, `.badge` (`ok/warn/bad/neut/info`), `.pill`, `.prov .dot`, `.pulse`, `.metric`, `.row-ctl`, `.field`, `.switch`, varianti `.btn`, `.chain-node` / `.chain-flow` / `.chain-arrow`, `.ac-list` (autocomplete), `.chip` / `.chips`, `.gauge`, `.facet`, `.modal`, `.bar-row`, badge dei tier.
+I vecchi nomi (`--green`, `--amber`, `--blue`, `--red`, `--faint`, `--accent`, `--surface2`, `--bg2`, `--border2`…) restano come **alias** in fondo a `:root`, perché `app.js` li usa negli stili inline. Non rimuoverli senza ripulire `app.js`.
 
-Sezioni del CSS: sidebar (64), main (99), metriche (112), pannelli (127), bottoni (151), tabelle (185), input (235), overview v2 a griglia 12 colonne (259), pipeline catene (345), eventi (365), toast (370), autocomplete (385), componenti v2 (401), catalogo (450).
+Componenti da riusare: `.panel`, `.badge` (`ok/warn/bad/neut/info`, `tier-*`), `.pill`, `.prov .dot`, `.pulse`, `.metric`, `.row-ctl`, `.field`, `.switch`, bottoni (`primary/ghost/danger/sm`), `.chain-node` / `.chain-flow`, `.ac-list`, `.chip`, `.gauge`, `.facet`, `.modal`, `.bar-row`.
 
-> [!warning] Font
-> `index.html` carica **Geist** e **Geist Mono** da Google Fonts, ma il CSS chiede `"Hanken Grotesk"`. Vedi [[Insidie note#Font dichiarato e font caricato non coincidono]].
+`renderRoutingNow()` in `app.js` riempie `#routing-now` (modello @ provider + $/M) a ogni `loadCommon()` e al polling di 30 s.
+
+La landing (`static/landing.html`, servita su `/landing`) ha CSS inline con gli stessi token. `docs/index.html` è la sua copia per GitHub Pages: logo relativo e link "dashboard" verso GitHub. Va rigenerata quando cambia la landing.
+
+> [!note] Rebrand solo di facciata
+> Il nome JAR riguarda UI, landing e README. Restano invariati: pacchetto `pennyroute/`, variabili `PENNY_*`, alias modello `penny` / `penny:<catena>`, chiavi `pnk-`, campo di risposta `pennyroute.served_by`, chiavi `localStorage` `penny_*`.
 
 ## Sicurezza del rendering
 

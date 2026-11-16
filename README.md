@@ -1,77 +1,108 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="PennyRoute — the frugal AI router" width="100%">
-</p>
-
-<h1 align="center">PennyRoute</h1>
-<p align="center">
-  <b>The frugal AI router.</b> Rank model providers by real, blended cost — and always route through the cheapest healthy one, with automatic fallback chains.<br>
-  Built for OpenRouter. Zero lock-in · zero build · self-hosted · MIT
+  <img src="assets/banner.svg" alt="JAR — Just Another Router" width="100%">
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/license-MIT-34d399" alt="MIT">
-  <img src="https://img.shields.io/badge/python-3.10%2B-34d399" alt="Python 3.10+">
-  <img src="https://img.shields.io/badge/backend-FastAPI-34d399" alt="FastAPI">
-  <img src="https://img.shields.io/badge/frontend-zero--build-34d399" alt="Zero build">
-  <img src="https://img.shields.io/badge/install-one--command-34d399" alt="One command install">
+  <b>A self-hosted router for OpenRouter that sends every request to the cheapest provider that is actually up.</b>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Bohsauro/pennyroute/actions/workflows/ci.yml"><img src="https://github.com/Bohsauro/pennyroute/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2b45e0" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/python-3.10%2B-2b45e0" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/API-OpenAI--compatible-2b45e0" alt="OpenAI-compatible API">
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#use-it-as-your-endpoint">Use it</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#deploying">Deploying</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
 </p>
 
 ---
 
-## One-command install
+## Why
+
+One model id on OpenRouter is usually hosted by many providers, and their prices for the same model can differ by 10× or more. The list price also hides what you really pay. In agent workloads most tokens are cache reads of a system prompt sent again every turn, so a provider that is cheap on input can still be the most expensive one for you.
+
+JAR prices every provider on **your** token mix, drops the ones that are slow, flaky or over budget, and routes each request to the cheapest one left. If that provider fails, the next one answers and your client never notices.
+
+## Features
+
+- **Prices on your real traffic.** Every model × provider pair gets one number, dollars per million tokens, weighted by your input / cache-read / output split. The default mix (14% / 85% / 1%) comes from a measured agent workload. Providers that hide their cache price get a pessimistic estimate, marked `≈`.
+- **Health gates.** A provider must reach 45 tokens/s and 99% uptime (both configurable) before it can be picked.
+- **Fallback chains.** Ordered lists such as "free models first, then this model, then the cheapest paid one". JAR uses the first step that has a healthy provider.
+- **Per-request failover.** If a provider errors, the request is retried on the next candidate.
+- **OpenAI-compatible API.** `/v1/chat/completions` (streaming included) and `/v1/models`, with their own API keys. Works with the `openai` SDK, LangChain, Cursor, Aider, curl and anything else that speaks OpenAI.
+- **Provider budgets.** Request, token or spend limits per provider, per day, month or in total. A provider that hits its limit, or that you block, is skipped automatically.
+- **Full catalog.** Browse every OpenRouter model by tier, family and tag, and add models to your watchlist one at a time, from a preset, or as a whole filtered set.
+- **Dashboard.** What is serving right now, the failover pipeline, the cost ranking with a per-provider breakdown, chain editor, budgets, API keys, a built-in chat and an event log.
+- **No benchmark traffic.** Prices, throughput and uptime come from OpenRouter's live endpoint stats. No tokens are spent measuring anything.
+- **Plain files.** All state is JSON in `data/`. No database, no frontend build step.
+
+## Quick start
+
+You need Python 3.10+ and an [OpenRouter API key](https://openrouter.ai/keys).
+
+**One command** (creates a venv, asks for your key, registers a systemd service where available):
 
 ```bash
 wget -qO- https://raw.githubusercontent.com/Bohsauro/pennyroute/main/install.sh | bash
 ```
 
-Opens on `http://<your-ip>:8490` (LAN + Tailscale friendly — binds `0.0.0.0`).
-Installer creates a venv, installs deps, saves your OpenRouter key, and (on systemd hosts) registers a live service. Manual install:
+**Docker:**
 
 ```bash
 git clone https://github.com/Bohsauro/pennyroute.git && cd pennyroute
+cp .env.example .env          # set OPENROUTER_API_KEY and PENNY_ADMIN_TOKEN
+docker compose up -d
+```
+
+**Manual:**
+
+```bash
+git clone https://github.com/Bohsauro/pennyroute.git && cd pennyroute
+python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # then edit .env and paste your OpenRouter key
+cp .env.example .env          # set OPENROUTER_API_KEY
 uvicorn pennyroute.app:app --host 0.0.0.0 --port 8490
 ```
 
-## Why
+Then open `http://localhost:8490` for the dashboard, or `http://localhost:8490/landing` for the project page.
 
-The **same model** is served by many providers at wildly different prices — a **10–100× spread on the same model ID**. And for agentic workloads most of your tokens are *cache-reads* of a system prompt re-sent every turn, so the price that matters is the **blended** one under *your* token mix — not the list price.
+## How it works
 
-PennyRoute measures, ranks, and switches — automatically.
+```
+ watchlist ──▶ rank every model × provider ──▶ walk the primary chain ──▶ cheapest healthy provider
+                · $/M on your token mix          top to bottom                   │
+                · drop slow, down, over budget                                   ▼
+                                                                   the request is served there;
+                                                                   on error the next one retries
+```
 
-## What it does
+Every few minutes (5 by default) a background engine:
 
-- **Blended cost ranking** — every model × provider endpoint priced with *your* real token mix (input / cache-read / output). Defaults to a measured agent workload: **14% input / 85% cache / 1% output**. Providers hiding their cache price get a pessimistic estimate, flagged `≈` in the UI.
-- **Health gates** — cheap but dead is worthless: endpoints need `throughput p50 ≥ 45 tps` and `uptime ≥ 99%`.
-- **Automatic fallback chains**:
-  ```
-  cheapest :free model  →  cheapest paid model  →  fixed model @ fixed provider
-  ```
-  The engine walks the chain top → bottom and uses the first healthy step.
-- **Auto-routing** — a background engine re-evaluates every N minutes and applies the cheapest healthy choice (writes your config, reloads). Zero benchmark calls, zero tokens burned: it reads OpenRouter's live endpoint stats.
-- **It *is* the API** — OpenAI-compatible `/v1/chat/completions` + `/v1/models` with its own API keys. Point the `openai` SDK, LangChain, Aider, Cursor, Claude Code, or anything at PennyRoute, and every request is served by the cheapest healthy provider *at that moment*. Streaming included, per-request failover included.
-- **Built-in Chat** — paste your PennyRoute key in the WebUI and talk to the router from any device on the network. Shows exactly which model served each reply.
-- **Preset watchlists** — one-click `frugal` (flash-class), `balanced` (mid + coding), `premium` (Opus/Sonnet/GPT/Gemini — still routed to the cheapest healthy provider), `free` (`:free` only).
-- **v2.0 — full classified catalog** — browse every OpenRouter model by tier (free/ budget/ value/ mid/ premium/ ultra), family and tag, with facet counts, price / context sorting, and bulk "add all filtered" to your watchlist.
-- **v2.0 — provider budgets & usage tracking** — set per-provider `requests` / `tokens` / `spend` limits (day / month / total). Exhausted or blocked providers are auto-skipped by the router, and remaining gauges update live.
-- **v2.0 — multi-provider ordered chain steps** — pin an ordered list of providers to any chain step (first available + healthy wins, step skipped if none) or restrict the cheapest pick to specific providers.
-- **v2.0 — per-provider GUI** — block/unblock, reset usage, edit limits and notes, plus day / month / total usage windows with remaining gauges.
-- **WebUI** — live routing telemetry (trends, donut, cost ladder), ranking with provider drill-down, chain editor, key management, search across the full OpenRouter catalog, settings, event log.
-- **Hermes Agent native** — writes `model.default` + `provider_routing.order` (as a *real YAML list* — not the string that silently breaks the pin) into `~/.hermes/config.yaml`.
+1. fetches pricing, throughput and uptime for every provider of the models on your watchlist;
+2. computes each provider's blended price:
 
-## Screenshots
+   ```
+   blended $/M = in% · input price + cache% · cache-read price + out% · output price
+   ```
 
-| Landing | Overview | Ranking | Chat |
-|---|---|---|---|
-| ![Landing](assets/screenshot-landing.png) | ![Overview](assets/screenshot-overview.png) | ![Ranking](assets/screenshot-ranking.png) | ![Chat](assets/screenshot-chat.png) |
+3. drops providers under the health gates, over budget or blocked;
+4. walks the primary chain and records the first healthy choice.
 
-## Use it as your AI endpoint
+Requests to `/v1/chat/completions` are resolved the same way when they arrive.
 
-Create a key in the WebUI (**API endpoint** → *Create key*), then:
+## Use it as your endpoint
+
+Create a key in the dashboard (**API endpoint → Create key**). It is shown only once.
 
 ```bash
-curl http://YOUR-IP:8490/v1/chat/completions \
+curl http://localhost:8490/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "X-API-Key: pnk-YOUR-KEY" \
   -d '{"model": "penny", "messages": [{"role": "user", "content": "hello"}], "stream": true}'
@@ -79,129 +110,177 @@ curl http://YOUR-IP:8490/v1/chat/completions \
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://YOUR-IP:8490/v1", api_key="pnk-YOUR-KEY")
-r = client.chat.completions.create(model="penny", messages=[{"role": "user", "content": "hello"}])
-print(r.model)  # the model that actually served you
+
+client = OpenAI(base_url="http://localhost:8490/v1", api_key="pnk-YOUR-KEY")
+r = client.chat.completions.create(
+    model="penny",
+    messages=[{"role": "user", "content": "hello"}],
+)
+print(r.model)  # the model that actually answered
 ```
 
-**Model field routing:**
+The `model` field picks the route:
 
-| `model` value | Behaviour |
+| `model` | Routed to |
 |---|---|
-| `"penny"` | primary fallback chain resolves it (cheapest healthy provider at that moment) |
-| `"penny:<chain>"` | a named chain |
-| any model id | that model, routed to its cheapest healthy provider |
+| `penny` | the primary chain |
+| `penny:<chain>` | the chain with that name |
+| any OpenRouter model id | that model, on its cheapest healthy provider |
 
-Failover is per-request: a provider error silently retries the next candidate — the client never sees the switch. Every response carries `pennyroute.served_by`.
+Every response includes `pennyroute.served_by`: the model and provider that answered.
 
-## How routing works
-
-```
-            ┌──────────────┐   every N min    ┌─────────────────────┐
- watchlist ─▶  rank models  ├─────────────────▶ │ resolve primary     │
- (preset or │  × providers  │  blended $/M      │ chain top → bottom  │
-  custom)   └──────────────┘  health gates    └─────────┬───────────┘
-                                                        │ first healthy step
-                                                        ▼
-                                          ┌──────────────────────────┐
-                                          │ config.yaml unchanged?   │
-                                          │  yes → sleep             │
-                                          │  no  → rewrite + reload  │
-                                          └──────────────────────────┘
-```
-
-**Blended cost** (per 1M total tokens, under your mix):
-
-```
-blended $/M = in_f · input + cache_f · cache_read + out_f · output
-```
-
-## Presets
-
-Applied with one click in the **Watchlist** tab (or via `POST /api/presets/<name>`):
-
-| Preset | Models | Use case |
-|---|---|---|
-| `frugal` | DeepSeek V4.1/V4 Flash, GLM 5.3 Flash, Qwen3.7 Flash, MiniMax M3.1, Mistral Small, StepFun, Gemini 3.8 Flash | cheap agent/coding |
-| `balanced` | frugal + Kimi K2.7 Code, GPT-5.4 Mini, Gemini 3.7 Flash | mid + coding specialists |
-| `premium` | Opus 5.5, Sonnet 5.5, GPT-5.4, Gemini 4 Argon, GLM 5.3 Prime, Qwen Max Prime | top quality, still cheapest provider |
-| `free` | `:free` model variants | zero cost when available |
+> **About the names:** the project was called PennyRoute before it became JAR. The `penny` model alias, the `pnk-` key prefix, the `PENNY_*` variables and the `pennyroute` package keep the old name, so existing clients and installs keep working.
 
 ## Fallback chains
 
-Chains live in `data/chains.json`, edited visually in the WebUI. Step types:
+A chain is an ordered list of steps in `data/chains.json`, edited visually in the **Fallback chains** tab.
 
-| Type | Meaning |
+| Step type | Meaning |
 |---|---|
-| `cheapest` | cheapest healthy endpoint in the watchlist; optional `filter` (e.g. `":free"`) |
-| `model` | fixed model; provider `auto` or pinned |
-
-Free-first example:
+| `cheapest` | the cheapest healthy provider across the watchlist. Optional `filter` (for example `":free"`) and optional `providers` to restrict the pick |
+| `model` | a fixed model. Optional `providers` list, tried in order; the step is skipped if none is available |
 
 ```json
-{ "name": "free-first", "primary": false, "auto_apply": false,
-  "entries": [ { "type": "cheapest", "filter": ":free" }, { "type": "cheapest" } ] }
+{
+  "name": "main",
+  "primary": true,
+  "auto_apply": true,
+  "entries": [
+    { "type": "cheapest", "filter": ":free" },
+    { "type": "model", "model": "deepseek/deepseek-chat-v3", "providers": ["DeepInfra"] },
+    { "type": "cheapest" }
+  ]
+}
 ```
 
-The **primary** chain is what the engine enforces. Others are recipes you promote with one click.
+The primary chain drives the `penny` alias and the engine. Other chains are available as `penny:<name>` and can be made primary with one click.
+
+## Presets
+
+One-click watchlists in the **Watchlist** tab, or `POST /api/presets/<name>`:
+
+| Preset | For |
+|---|---|
+| `frugal` | cheap flash-class models for agents and coding |
+| `balanced` | `frugal` plus mid-tier and coding models |
+| `premium` | top models, still served by their cheapest healthy provider |
+| `free` | `:free` variants only |
 
 ## Configuration
 
-All state is plain JSON in `data/` — no database:
+### Environment
 
-| File | Purpose |
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPENROUTER_API_KEY` | — | **Required.** Reads the catalog and forwards requests. |
+| `PENNY_ADMIN_TOKEN` | unset | Password for the dashboard and `/api/*`. Without it they only answer to localhost. |
+| `PENNY_RATE_LIMIT` | `120` | Max `/v1` requests per minute per client IP. `0` turns the limit off. |
+
+The installer also reads `PENNY_PORT` (default `8490`) and `PENNY_INSTALL_DIR` (default `~/pennyroute`).
+
+### Settings
+
+Changed live in the **Settings** tab and stored in `data/settings.json`:
+
+```json
+{
+  "mix": { "in": 0.14, "cache": 0.85, "out": 0.01 },
+  "min_tps": 45,
+  "min_uptime": 99.0,
+  "interval_min": 5,
+  "gateway_restart": true
+}
+```
+
+To measure your own mix, export your OpenRouter activity CSV, add up input, cache-read and output tokens, and enter the percentages.
+
+### Data files
+
+| File | Contents |
 |---|---|
 | `data/models.json` | watchlist |
 | `data/chains.json` | fallback chains |
-| `data/settings.json` | cost mix, health gates, interval, restart behaviour |
-| `data/keys.json` | `/v1` API keys (hashed, shown once) |
-| `data/telemetry.json` | routing snapshots for the 24h trend |
-| `data/events.jsonl` | append-only switch/error log |
+| `data/settings.json` | token mix, health gates, interval |
+| `data/keys.json` | `/v1` API keys, stored as SHA-256 hashes |
+| `data/providers.json` | provider budgets, blocks and notes |
+| `data/usage.json` | usage counters, written by the router |
+| `data/telemetry.json` | routing snapshots for the 24 h trend |
+| `data/events.jsonl` | append-only log of switches and errors |
 
-```json
-{ "mix": { "in": 0.14, "cache": 0.85, "out": 0.01 },
-  "min_tps": 45, "min_uptime": 99.0, "interval_min": 5, "gateway_restart": true }
-```
+Back up `data/`: it holds everything.
 
-Measure *your* mix once (export your OpenRouter activity CSV, count tokens by type), set it in **Settings**, and the ranking becomes exactly your wallet's point of view.
+## Deploying
 
-## Production notes
+- **Local network or VPN.** JAR binds `0.0.0.0`, so it is reachable over LAN or Tailscale/WireGuard on port `8490`.
+- **Remote access.** Set `PENNY_ADMIN_TOKEN` (the dashboard asks for it once) and put JAR behind a reverse proxy with HTTPS (Caddy, nginx, Cloudflare Tunnel). Never expose plain HTTP to the internet: API keys and the admin token travel in headers.
+- **Behind a proxy on the same host**, run uvicorn with `--forwarded-allow-ips` set to the proxy address so rate limits see real client IPs. The Docker image already passes `--proxy-headers`.
+- **Health check:** `GET /healthz`.
 
-- **Reachability**: binds `0.0.0.0` by default — reach it via LAN or Tailscale.
-- **Security**: the WebUI is unauthenticated (LAN tool). The `/v1` endpoint requires a `pnk-…` key. Put a reverse proxy in front if you expose it publicly.
-- **Hermes integration**: PennyRoute writes `~/.hermes/config.yaml`; restart your gateway after a manual change, or let the engine do it (`gateway_restart: true`).
-- **Auto-apply**: starts ON for the primary chain. Want watch-mode first? Flip `auto_apply` off in the Chains tab, watch Events for a few cycles, then enable.
+### Hermes Agent
+
+If `~/.hermes` exists on the host, the engine writes the chosen model and provider order into `~/.hermes/config.yaml` and can restart the gateway (`gateway_restart`). Inside a container it only records telemetry. Chains start with `auto_apply` on: turn it off in the **Fallback chains** tab if you want to watch the **Events** log for a few cycles before JAR changes your agent's config.
+
+## API reference
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `POST /v1/chat/completions` | API key | OpenAI-compatible chat, streaming supported |
+| `GET /v1/models` | API key | the `penny` aliases plus the watchlist |
+| `GET /healthz` | none | liveness probe |
+| `GET /api/rank` | admin | ranked watchlist with every provider |
+| `GET /api/catalog` | admin | full OpenRouter catalog with filters and facets |
+| `/api/chains` | admin | create, edit, delete chains and pick the primary |
+| `/api/providers` | admin | budgets, blocks and usage |
+| `/api/keys` | admin | create and revoke `/v1` API keys |
+| `GET`, `PUT /api/settings` | admin | engine settings |
+| `GET /api/events` | admin | event log |
+
+The dashboard only uses these endpoints, so anything it does can be scripted.
 
 ## Project layout
 
 ```
-pennyroute/
-├── pennyroute/
-│   ├── app.py          # FastAPI routes + static serving
-│   ├── router_proxy.py # OpenAI-compatible /v1 proxy + failover
-│   ├── engine.py       # fallback-chain router (background thread)
-│   ├── ranking.py      # blended-cost ranking + chain resolution
-│   ├── orclient.py     # OpenRouter client (cached)
-│   ├── keys.py         # API key management (hashed)
-│   └── store.py        # JSON state + presets
-├── static/             # zero-build WebUI
-├── assets/             # banner + screenshots
-├── install.sh          # one-command installer (+systemd)
-├── docs/               # landing page (GitHub Pages)
-└── data/               # runtime state (gitignored)
+pennyroute/            Python package (FastAPI backend)
+  app.py               routes and static files
+  router_proxy.py      /v1 proxy with per-request failover
+  engine.py            background evaluation loop
+  ranking.py           blended cost, health gates, chain resolution
+  providers.py         provider budgets and usage counters
+  orclient.py          OpenRouter client with caching
+  security.py          admin token and rate limiting
+  keys.py              API keys
+  store.py             JSON state and presets
+static/                dashboard and landing page (vanilla JS, no build)
+docs/                  landing page for GitHub Pages
+tests/                 regression tests
+install.sh             one-command installer
+Dockerfile, docker-compose.yml
 ```
+
+## Development
+
+```bash
+pip install -r requirements.txt
+uvicorn pennyroute.app:app --reload --port 8490
+python -m unittest discover tests
+```
+
+There is no frontend build: edit `static/` and reload the page. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## Roadmap
 
 - [ ] Real spend tracking from the OpenRouter activity API
-- [ ] Slack/Telegram/Discord notifications on switch
-- [ ] Multi-provider backends beyond OpenRouter
-- [ ] Docker image
+- [ ] Notifications (Slack, Telegram, Discord) when the route changes
+- [ ] Backends beyond OpenRouter
+- [x] Docker image
+- [x] Provider budgets and usage tracking
 
-## Disclaimer
+## Security
 
-PennyRoute changes your agent's model configuration automatically. Start with `auto_apply: false`, watch the Events tab for a few cycles, then flip it on.
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), not in public issues.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE) © Bohsauro
+
+JAR is not affiliated with OpenRouter. Prices and health data come from OpenRouter's public endpoint stats and can lag reality by a few minutes.

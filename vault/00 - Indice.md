@@ -41,6 +41,7 @@ Router AI "frugale" per OpenRouter: classifica ogni coppia modello × provider p
 - [[Frontend SPA]] — `static/app.js`, viste, stato globale, design system
 - [[File dati]] — schema di ogni file in `data/`
 - [[Deploy e configurazione]] — installer, systemd, chiave OpenRouter, Hermes
+- File open source (2026-11-16, rebrand JAR): `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `.github/` (CI con unittest su Python 3.10/3.12 + `node --check` + build Docker, template issue/PR). Il README va tenuto allineato a variabili `PENNY_*`, file in `data/` e rotte in `app.py`
 
 ## Prima di modificare
 

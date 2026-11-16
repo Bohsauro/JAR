@@ -1,4 +1,4 @@
-/* PennyRoute — SPA logic (vanilla JS, no build step) */
+/* JAR (Just Another Router) — SPA logic (vanilla JS, no build step) */
 
 const $ = (q, el) => (el || document).querySelector(q);
 const $$ = (q, el) => Array.from((el || document).querySelectorAll(q));
@@ -21,8 +21,16 @@ let PROVIDERS = [];
 let CHAIN_AVAIL = {};
 const CAT = { q: "", tier: "", family: "", tag: "", sort: "", limit: 50, offset: 0, total: 0, results: [], facets: null };
 
-async function api(path, opts) {
-  const r = await fetch(path, opts);
+let _adminPromptDone = false;
+async function api(path, opts = {}) {
+  const tok = localStorage.getItem("penny_admin");
+  const o = tok ? { ...opts, headers: { ...(opts.headers || {}), "X-Admin-Token": tok } } : opts;
+  const r = await fetch(path, o);
+  if (r.status === 401 && !_adminPromptDone) {
+    const t = prompt("Admin token (PENNY_ADMIN_TOKEN on the server):");
+    if (!t) _adminPromptDone = true;  // cancelled: don't re-prompt on every poll
+    else { localStorage.setItem("penny_admin", t.trim()); return api(path, opts); }
+  }
   if (!r.ok) {
     let msg = r.status;
     try { msg = (await r.json()).detail || msg; } catch (e) {}
@@ -67,16 +75,21 @@ const NAV = [
 
 function buildNav() {
   $("#nav").innerHTML = NAV.map(([id, label, icon]) =>
-    `<div class="nav-item" data-view="${id}">${icon}<span>${label}</span></div>`).join("");
-  $$("#nav .nav-item").forEach(el =>
-    el.onclick = () => { location.hash = "#/" + el.dataset.view; });
+    `<a class="nav-item" href="#/${id}" data-view="${id}">${icon}<span>${label}</span></a>`).join("");
+}
+
+/* top-bar readout: what requests are routed to right now */
+function renderRoutingNow() {
+  const a = STATE.active || {};
+  const prov = (a.order && a.order[0]) || "auto";
+  const best = RANKED.find(m => m.slug === a.model);
+  const price = best && best.best ? fmt(best.best.blended) + " $/M" : "";
+  $("#routing-now").innerHTML = a.model
+    ? `<span class="pulse"></span><span class="what">${esc(a.model)} @ ${esc(prov)}</span><span class="price">${price}</span>`
+    : `<span class="dot"></span><span class="what">no active route</span>`;
 }
 
 /* ------------------------------------------------------------------ data */
-
-async function refreshAll() {
-  [STATE] = await Promise.all([api("/api/state")]);
-}
 
 /* ---------------------------------------------------------------- views */
 
@@ -114,7 +127,7 @@ function svgSparkline(vals, color = "var(--green)") {
   </svg>`;
 }
 
-const PALETTE = ["var(--green)", "var(--blue)", "var(--amber)", "var(--red)", "#a78bfa"];
+const PALETTE = ["var(--green)", "var(--blue)", "var(--amber)", "var(--red)", "#5b3fb3"];
 
 function viewOverview() {
   const a = STATE.active;
@@ -230,7 +243,7 @@ async function loadOverview() {
   const ovProvs = ovProviderRows(prov.providers || []);
   $("#ov-side").innerHTML = `
     <div class="panel">
-      <span class="live-pill"><span class="pulse"></span><span>Routing Engine Live</span><span class="u">· 5m</span></span>
+      <span class="live-pill"><span class="pulse"></span><span>Routing engine running</span><span class="u">· 5m</span></span>
       <div style="margin-top:12px" class="hint"><span style="font-family:var(--mono)">${esc(a.model || "—")}</span> @ <span style="font-family:var(--mono)">${esc((a.order && a.order[0]) || "—")}</span></div>
     </div>
     <div class="panel"><h2><span class="k">Blended cost</span> — 24h trend</h2>
@@ -245,7 +258,7 @@ async function loadOverview() {
     <div class="panel"><h2><span class="k">Cost composition</span> — active endpoint</h2>
       ${b ? `<div class="donut-wrap">
         <svg width="86" height="86" viewBox="0 0 86 86">
-          <circle cx="43" cy="43" r="34" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="11"></circle>
+          <circle cx="43" cy="43" r="34" fill="none" stroke="var(--line)" stroke-width="11"></circle>
           ${donut.map(s => `<circle cx="43" cy="43" r="34" fill="none" stroke="${s.color}" stroke-width="11" stroke-dasharray="${s.dash}" stroke-dashoffset="${s.offset}" transform="rotate(-90 43 43)"></circle>`).join("")}
           <text x="43" y="39" text-anchor="middle" fill="var(--text)" font-size="13" font-family="var(--mono)" font-weight="600">${fmt(b.blended)}</text>
           <text x="43" y="54" text-anchor="middle" fill="var(--faint)" font-size="8" font-family="var(--mono)">$/M</text>
@@ -279,6 +292,7 @@ async function loadOverview() {
   // live refresher: ping every 5s (lightweight: just update pill + latency)
   clearInterval(_ovTimer);
   _ovTimer = setInterval(async () => {
+    if (!document.getElementById("ov-side")) { clearInterval(_ovTimer); return; }
     try {
       const t2 = await api("/api/telemetry");
       const pts = t2.points || [];
@@ -815,7 +829,7 @@ function availMapFrom(providers) {
 
 function availDot(name) {
   const a = CHAIN_AVAIL[name];
-  if (!a) return '<span class="dot" style="background:#565b66;width:5px;height:5px"></span>';
+  if (!a) return '<span class="dot" style="background:var(--line-strong);width:5px;height:5px"></span>';
   if (a.blocked || a.exhausted) return '<span class="dot bad" style="width:5px;height:5px"></span>';
   return '<span class="dot ok" style="width:5px;height:5px"></span>';
 }
@@ -1083,7 +1097,7 @@ async function chainAction(d) {
 async function viewApi() {
   $("#view").innerHTML = `
     <div class="page-head"><div><h1>API endpoint</h1>
-      <div class="sub">OpenAI-compatible. Point any client (openai SDK, LangChain, curl) at PennyRoute and it routes through your chains.</div></div></div>
+      <div class="sub">OpenAI-compatible. Point any client (openai SDK, LangChain, curl) at JAR and it routes through your chains.</div></div></div>
     <div class="panel"><h2>Base URL</h2>
       <div class="row-ctl">
         <div><label class="field">On this machine</label><input readonly value="http://localhost:8490/v1" id="url-local"></div>
@@ -1180,7 +1194,7 @@ function viewChat() {
       <div class="sub">Talk to the router from any device on Tailscale / LAN. Key stays in this browser (localStorage), never on the server.</div></div></div>
     <div class="panel" style="padding:14px 18px">
       <div class="row-ctl">
-        <div><label class="field">PennyRoute API key</label>
+        <div><label class="field">JAR API key</label>
           <input type="password" id="chat-key" placeholder="pnk-…" value="${esc(savedKey)}" class="mono"></div>
         <div style="min-width:300px"><label class="field">Route — fallback chain or model</label>
           <select id="chat-model">
@@ -1200,7 +1214,7 @@ function viewChat() {
     <div class="panel" style="padding:0">
       <div id="chat-log" style="padding:16px 18px;min-height:280px;max-height:60vh;overflow:auto"></div>
       <div style="border-top:1px solid var(--border);padding:12px 16px;display:flex;gap:10px">
-        <input id="chat-input" placeholder="Scrivi un messaggio… (Enter per inviare)" autocomplete="off">
+        <input id="chat-input" placeholder="Type a message. Enter sends." autocomplete="off">
         <button class="primary" id="chat-send" style="flex:none">Send</button>
       </div>
     </div>
@@ -1425,6 +1439,7 @@ async function loadCommon() {
   const [st, ch, md] = await Promise.all([api("/api/state"), api("/api/chains"), api("/api/models")]);
   STATE = st; CHAINS = ch.chains; MODELS = md.models;
   RANKED = (await api("/api/rank")).models;
+  renderRoutingNow();
   route();
 }
 
@@ -1437,6 +1452,6 @@ window.addEventListener("load", async () => {
     $("#view").innerHTML = `<div class="panel"><h2>Backend offline</h2><div class="muted">${esc(e.message)}</div></div>`;
   }
   setInterval(async () => {
-    try { STATE = await api("/api/state"); } catch (e) {}
+    try { STATE = await api("/api/state"); renderRoutingNow(); } catch (e) {}
   }, 30000);
 });

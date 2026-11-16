@@ -3,34 +3,29 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PennyRoute — the frugal AI router</title>
+<title>JAR — Just Another Router</title>
 <link rel="icon" href="/logo.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<div class="app">
-  <aside class="sidebar">
-    <div class="brand">
-      <img src="/logo.svg" alt="PennyRoute logo">
-      <div>
-        <div class="name">Penny<em>Route</em></div>
-        <div class="tag">the frugal AI router</div>
-      </div>
-    </div>
-    <nav id="nav"></nav>
-    <div class="spacer"></div>
-    <div class="side-foot">
-      Blended pricing · health-gated<br>
-      <a href="/landing" target="_blank">Landing ↗</a> · <a href="https://github.com/Bohsauro/pennyroute" target="_blank" rel="noopener">GitHub ↗</a><br>
-      <span id="foot-config"></span>
-    </div>
-  </aside>
-  <main class="main"><div id="view"></div></main>
-</div>
-<div id="toasts"></div>
+<header class="topbar">
+  <a class="wordmark" href="#/overview" aria-label="JAR home">
+    <img src="/logo.svg" alt="" width="26" height="26">
+    <b>JAR</b><span>just another router</span>
+  </a>
+  <nav id="nav" aria-label="Sections"></nav>
+  <div class="routing-now" id="routing-now" title="What requests are routed to right now"></div>
+</header>
+<main class="main"><div id="view"></div></main>
+<footer class="app-foot">
+  <span>Self-hosted. Prices from OpenRouter, ranked under your own token mix.</span>
+  <a href="/landing" target="_blank">About JAR</a>
+  <a href="https://github.com/Bohsauro/pennyroute" target="_blank" rel="noopener">Source on GitHub</a>
+</footer>
+<div id="toasts" role="status" aria-live="polite"></div>
 <script src="/app.js"></script>
 </body>
 </html>
