@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # JAR (Just Another Router) — one-command installer
-#   wget -qO- https://raw.githubusercontent.com/Bohsauro/pennyroute/main/install.sh | bash
+#   wget -qO- https://raw.githubusercontent.com/Bohsauro/JAR/main/install.sh | bash
 set -euo pipefail
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
@@ -29,7 +29,7 @@ if [ -d "$INSTALL_DIR/.git" ]; then
   say "  ✓ already cloned, pulling latest…"
   git -C "$INSTALL_DIR" pull --ff-only -q || warn "  pull failed, using local copy"
 else
-  git clone -q --depth 1 https://github.com/Bohsauro/pennyroute.git "$INSTALL_DIR" \
+  git clone -q --depth 1 https://github.com/Bohsauro/JAR.git "$INSTALL_DIR" \
     || die "clone failed"
   say "  ✓ cloned"
 fi

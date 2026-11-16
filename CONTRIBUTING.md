@@ -5,7 +5,7 @@ Thanks for helping. JAR is small on purpose, and these notes keep it that way.
 ## Getting set up
 
 ```bash
-git clone https://github.com/Bohsauro/pennyroute.git && cd pennyroute
+git clone https://github.com/Bohsauro/JAR.git && cd JAR
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env            # add an OpenRouter key to try routing for real

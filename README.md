@@ -7,13 +7,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Bohsauro/pennyroute/actions/workflows/ci.yml"><img src="https://github.com/Bohsauro/pennyroute/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/Bohsauro/JAR/actions/workflows/ci.yml"><img src="https://github.com/Bohsauro/JAR/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2b45e0" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-2b45e0" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/API-OpenAI--compatible-2b45e0" alt="OpenAI-compatible API">
 </p>
 
 <p align="center">
+  <a href="https://bohsauro.github.io/JAR/">Website</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#use-it-as-your-endpoint">Use it</a> ·
@@ -50,13 +51,13 @@ You need Python 3.10+ and an [OpenRouter API key](https://openrouter.ai/keys).
 **One command** (creates a venv, asks for your key, registers a systemd service where available):
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/Bohsauro/pennyroute/main/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/Bohsauro/JAR/main/install.sh | bash
 ```
 
 **Docker:**
 
 ```bash
-git clone https://github.com/Bohsauro/pennyroute.git && cd pennyroute
+git clone https://github.com/Bohsauro/JAR.git && cd JAR
 cp .env.example .env          # set OPENROUTER_API_KEY and PENNY_ADMIN_TOKEN
 docker compose up -d
 ```
@@ -64,7 +65,7 @@ docker compose up -d
 **Manual:**
 
 ```bash
-git clone https://github.com/Bohsauro/pennyroute.git && cd pennyroute
+git clone https://github.com/Bohsauro/JAR.git && cd JAR
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env          # set OPENROUTER_API_KEY

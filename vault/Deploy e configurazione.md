@@ -69,7 +69,7 @@ Il numero di versione è scritto in tre posti da tenere allineati:
 
 ## Repository
 
-- Remote: `github.com/Bohsauro/pennyroute`, branch `main`, 13 commit.
+- Remote: `github.com/Bohsauro/JAR`, branch `main`, 13 commit.
 - `docs/` è la landing per GitHub Pages più le spec storiche `V2-SPEC.md` e `V2-FRONTEND-SPEC.md`.
 - `assets/` contiene banner e screenshot del README.
 - `.ade/`, `.agents/`, `.gemini/` sono cartelle di strumenti locali, non fanno parte dell'applicazione.
