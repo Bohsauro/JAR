@@ -9,6 +9,11 @@ from unittest import mock
 
 from pennyroute import providers, router_proxy
 
+
+def _client(app, host="127.0.0.1"):
+    from fastapi.testclient import TestClient
+    return TestClient(app, client=(host, 5000))
+
 DAY_LIMIT = {"P": {"note": "", "blocked": False,
                    "limits": {"requests": {"per": "day", "max": 10.0}}}}
 
@@ -75,3 +80,121 @@ class StreamPassthroughTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ApiRegressions(unittest.TestCase):
+    def test_pipeline_survives_error_rows(self):
+        from fastapi.testclient import TestClient
+        from pennyroute import app as appmod
+        chain = {"name": "c", "primary": True, "entries": []}
+        with mock.patch.object(appmod.store, "load_chains", return_value=[chain]), \
+             mock.patch.object(appmod.router_proxy, "build_candidates",
+                               return_value=[{"model": "m", "provider": "p"}]), \
+             mock.patch.object(appmod.ranking, "rank_endpoints",
+                               return_value=[{"error": "boom"}]):
+            r = _client(appmod.app).get("/api/pipeline")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["candidates"][0]["healthy"])
+
+    def test_revoked_key_stays_revoked_and_verify_works(self):
+        from pennyroute import keys
+        with tempfile.TemporaryDirectory() as d, \
+             mock.patch.object(keys, "KEYS_FILE", Path(d) / "keys.json"):
+            k = keys.create_key("t")
+            self.assertTrue(keys.verify_key("Bearer " + k["key"]))
+            keys.revoke_key(k["id"])
+            self.assertFalse(keys.verify_key(k["key"]))
+
+    def test_empty_preset_rejected(self):
+        from fastapi.testclient import TestClient
+        from pennyroute import app as appmod
+        with mock.patch.object(appmod.store, "save_models") as sm:
+            r = _client(appmod.app).post("/api/presets/free")
+        self.assertEqual(r.status_code, 400)
+        sm.assert_not_called()
+
+
+class MoreRegressions(unittest.TestCase):
+    def test_settings_reject_bad_mix(self):
+        from fastapi.testclient import TestClient
+        from pennyroute import app as appmod
+        c = _client(appmod.app)
+        with mock.patch.object(appmod.store, "save_settings") as ss:
+            for bad in ({"in": "x", "cache": 1, "out": 1}, {"in": 1},
+                        {"in": 0, "cache": 0, "out": 0}, {"in": -1, "cache": 1, "out": 1}):
+                self.assertEqual(c.put("/api/settings", json={"mix": bad}).status_code, 400)
+            ss.assert_not_called()
+
+    def test_auto_step_falls_to_next_healthy_endpoint(self):
+        from pennyroute import ranking
+        rows = [{"provider": "A", "healthy": True, "blended": 1},
+                {"provider": "B", "healthy": True, "blended": 2}]
+        chain = {"entries": [{"type": "model", "model": "m"}]}
+        with mock.patch.object(ranking, "rank_endpoints", return_value=rows):
+            res = ranking.resolve_chain(chain, [], {}, {}, provider_ok=lambda n: n == "B")
+        self.assertEqual(res["provider"], "B")
+
+    def test_endpoint_errors_expire_quickly(self):
+        from pennyroute import orclient
+        orclient._cache.clear()
+        calls = []
+        def fake(url, timeout=40):
+            calls.append(1)
+            return {"__error": "net"} if len(calls) == 1 else {"data": {"endpoints": []}}
+        with mock.patch.object(orclient, "_get", fake):
+            self.assertIn("error", orclient.fetch_endpoints_raw("a/b"))
+            orclient._cache["ep:a/b"]["ts"] -= orclient.ERROR_TTL + 1
+            self.assertEqual(orclient.fetch_endpoints_raw("a/b"), [])
+
+    def test_events_file_is_trimmed(self):
+        from pennyroute import store
+        with tempfile.TemporaryDirectory() as d, \
+             mock.patch.object(store, "EVENTS_FILE", Path(d) / "e.jsonl"), \
+             mock.patch.object(store, "EVENTS_MAX_BYTES", 500), \
+             mock.patch.object(store, "EVENTS_KEEP_LINES", 5):
+            for i in range(50):
+                store.log_event("t", {"i": i})
+            n = len(store.EVENTS_FILE.read_text().splitlines())
+        self.assertLessEqual(n, 10)
+
+
+class HostingGuards(unittest.TestCase):
+    def test_management_api_local_only_without_token(self):
+        from pennyroute import app as appmod
+        with mock.patch.dict("os.environ", {"PENNY_ADMIN_TOKEN": ""}):
+            self.assertEqual(_client(appmod.app, "10.0.0.5").get("/api/settings").status_code, 403)
+            self.assertEqual(_client(appmod.app).get("/api/settings").status_code, 200)
+            self.assertEqual(_client(appmod.app).get(
+                "/api/settings", headers={"X-Forwarded-For": "8.8.8.8"}).status_code, 403)
+
+    def test_admin_token_required_remotely(self):
+        from pennyroute import app as appmod, security
+        security._hits.clear()
+        with mock.patch.dict("os.environ", {"PENNY_ADMIN_TOKEN": "s3cret"}):
+            c = _client(appmod.app, "10.0.0.5")
+            self.assertEqual(c.get("/api/settings").status_code, 401)
+            self.assertEqual(c.get("/api/settings", headers={"X-Admin-Token": "bad"}).status_code, 401)
+            self.assertEqual(c.get("/api/settings", headers={"X-Admin-Token": "s3cret"}).status_code, 200)
+            self.assertEqual(c.get("/api/settings",
+                                   headers={"Authorization": "Bearer s3cret"}).status_code, 200)
+
+    def test_failed_admin_attempts_get_throttled(self):
+        from pennyroute import app as appmod, security
+        security._hits.clear()
+        with mock.patch.dict("os.environ", {"PENNY_ADMIN_TOKEN": "s3cret"}):
+            c = _client(appmod.app, "10.0.0.6")
+            codes = [c.get("/api/settings").status_code for _ in range(security.ADMIN_FAIL_LIMIT + 2)]
+        self.assertEqual(codes[-1], 429)
+
+    def test_v1_rate_limit(self):
+        from pennyroute import app as appmod, security
+        security._hits.clear()
+        with mock.patch.dict("os.environ", {"PENNY_RATE_LIMIT": "3"}):
+            c = _client(appmod.app, "10.0.0.7")
+            codes = [c.get("/v1/models").status_code for _ in range(5)]
+        self.assertEqual(codes[:3], [401] * 3)  # no key, but not rate limited yet
+        self.assertEqual(codes[3:], [429, 429])
+
+    def test_healthz_is_open(self):
+        from pennyroute import app as appmod
+        self.assertEqual(_client(appmod.app, "10.0.0.8").get("/healthz").status_code, 200)

@@ -1,8 +1,9 @@
-"""PennyRoute — FastAPI app.
+"""JAR (Just Another Router) — FastAPI app.
 
 Run:  uvicorn pennyroute.app:app --host 0.0.0.0 --port 8490
 """
 
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -16,22 +17,51 @@ from . import orclient
 from . import providers
 from . import ranking
 from . import router_proxy
+from . import security
 from . import store
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
-app = FastAPI(title="PennyRoute", version="2.0.0")
+log = logging.getLogger("pennyroute")
+
+app = FastAPI(title="JAR", version="2.0.0")
+# Browsers on other origins may call /v1 (key-authenticated, no cookies). Without an
+# admin token the service is local-only, so cross-origin access stays off.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"] if security.admin_token() else [],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
+@app.middleware("http")
+async def guard(request: Request, call_next):
+    path = request.url.path
+    if request.method != "OPTIONS":
+        if path.startswith("/v1/"):
+            limit = security.v1_rate_limit()
+            if limit and security.rate_limited(("v1", security.client_ip(request)), limit):
+                return JSONResponse({"detail": "rate limit exceeded"}, status_code=429)
+        elif path.startswith("/api/"):
+            denied = security.check_admin(request)
+            if denied:
+                return JSONResponse({"detail": denied[1]}, status_code=denied[0])
+    return await call_next(request)
+
+
 @app.on_event("startup")
 def _startup():
+    if not orclient.get_key():
+        log.warning("no OpenRouter key found: set OPENROUTER_API_KEY, requests will fail")
+    if not security.admin_token():
+        log.warning("PENNY_ADMIN_TOKEN not set: management API (/api) is local-only")
     engine.start()
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
 
 
 def _require_key(request: Request):
@@ -274,6 +304,8 @@ def api_apply_preset(name: str):
     models = store.preset_models(name)
     if models is None:
         raise HTTPException(404, "preset not found")
+    if not models:
+        raise HTTPException(400, "preset has no models")
     store.save_models(models)
     store.log_event("preset", {"preset": name, "count": len(models)})
     return {"ok": True, "preset": name, "models": store.load_models()}
@@ -343,51 +375,55 @@ def _validate_chain(chain: dict):
 
 @app.post("/api/chains")
 def api_add_chain(c: ChainIn):
-    chains = store.load_chains()
-    if any(x["name"] == c.name for x in chains):
-        raise HTTPException(409, "chain name exists")
     chain = {"name": c.name, "primary": False, "auto_apply": c.auto_apply,
              "note": c.note, "entries": c.entries}
     _validate_chain(chain)
-    chains.append(chain)
-    store.save_chains(chains)
+    with store.lock:
+        chains = store.load_chains()
+        if any(x["name"] == c.name for x in chains):
+            raise HTTPException(409, "chain name exists")
+        chains.append(chain)
+        store.save_chains(chains)
     return {"ok": True}
 
 
 @app.put("/api/chains/{name}")
 def api_update_chain(name: str, c: ChainIn):
-    chains = store.load_chains()
-    for i, x in enumerate(chains):
-        if x["name"] == name:
-            chain = {"name": name, "primary": x.get("primary", False),
-                     "auto_apply": c.auto_apply, "note": c.note,
-                     "entries": c.entries}
-            _validate_chain(chain)
-            chains[i] = chain
-            store.save_chains(chains)
-            return {"ok": True}
+    with store.lock:
+        chains = store.load_chains()
+        for i, x in enumerate(chains):
+            if x["name"] == name:
+                chain = {"name": name, "primary": x.get("primary", False),
+                         "auto_apply": c.auto_apply, "note": c.note,
+                         "entries": c.entries}
+                _validate_chain(chain)
+                chains[i] = chain
+                store.save_chains(chains)
+                return {"ok": True}
     raise HTTPException(404, "chain not found")
 
 
 @app.post("/api/chains/{name}/primary")
 def api_set_primary(name: str):
-    chains = store.load_chains()
-    if not any(x["name"] == name for x in chains):
-        raise HTTPException(404, "chain not found")
-    for x in chains:
-        x["primary"] = (x["name"] == name)
-    store.save_chains(chains)
+    with store.lock:
+        chains = store.load_chains()
+        if not any(x["name"] == name for x in chains):
+            raise HTTPException(404, "chain not found")
+        for x in chains:
+            x["primary"] = (x["name"] == name)
+        store.save_chains(chains)
     store.log_event("primary", {"chain": name})
     return {"ok": True}
 
 
 @app.delete("/api/chains/{name}")
 def api_del_chain(name: str):
-    chains = store.load_chains()
-    primary = next((x for x in chains if x["name"] == name), None)
-    if primary and primary.get("primary") and len(chains) > 1:
-        raise HTTPException(400, "set another chain primary first")
-    store.save_chains([x for x in chains if x["name"] != name])
+    with store.lock:
+        chains = store.load_chains()
+        primary = next((x for x in chains if x["name"] == name), None)
+        if primary and primary.get("primary") and len(chains) > 1:
+            raise HTTPException(400, "set another chain primary first")
+        store.save_chains([x for x in chains if x["name"] != name])
     return {"ok": True}
 
 
@@ -400,6 +436,8 @@ class ApplyIn(BaseModel):
 
 @app.post("/api/apply")
 def api_apply(a: ApplyIn):
+    if not engine.CONFIG_PATH.parent.exists():
+        raise HTTPException(409, "no Hermes config on this host (nothing to apply to)")
     settings = store.load_settings()
     res = engine.apply_choice(a.model, a.provider,
                               restart=settings.get("gateway_restart", True))
@@ -421,6 +459,18 @@ class SettingsIn(BaseModel):
     gateway_restart: bool | None = None
 
 
+_MIX_KEYS = ("in", "cache", "out")
+
+
+def _validate_mix(mix: dict):
+    for k in _MIX_KEYS:
+        v = mix.get(k)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+            raise HTTPException(400, f"mix.{k} must be a number >= 0")
+    if sum(mix[k] for k in _MIX_KEYS) <= 0:
+        raise HTTPException(400, "mix weights must not all be zero")
+
+
 @app.get("/api/settings")
 def api_settings():
     return store.load_settings()
@@ -428,13 +478,21 @@ def api_settings():
 
 @app.put("/api/settings")
 def api_set_settings(s: SettingsIn):
-    cur = store.load_settings()
-    if s.mix:
-        cur["mix"] = s.mix
-    for k in ("min_tps", "min_uptime", "interval_min", "gateway_restart"):
-        if getattr(s, k) is not None:
-            cur[k] = getattr(s, k)
-    store.save_settings(cur)
+    if s.mix is not None:
+        _validate_mix(s.mix)
+    for k in ("min_tps", "min_uptime"):
+        if getattr(s, k) is not None and getattr(s, k) < 0:
+            raise HTTPException(400, f"{k} must be >= 0")
+    if s.interval_min is not None and s.interval_min < 1:
+        raise HTTPException(400, "interval_min must be >= 1")
+    with store.lock:
+        cur = store.load_settings()
+        if s.mix:
+            cur["mix"] = {k: float(s.mix[k]) for k in _MIX_KEYS}
+        for k in ("min_tps", "min_uptime", "interval_min", "gateway_restart"):
+            if getattr(s, k) is not None:
+                cur[k] = getattr(s, k)
+        store.save_settings(cur)
     return {"ok": True, "settings": cur}
 
 
@@ -501,8 +559,8 @@ def api_pipeline():
         rows = ranking.rank_endpoints(c["model"], settings["mix"],
                                       {"min_tps": settings["min_tps"],
                                        "min_uptime": settings["min_uptime"]})
-        ep = next((r for r in rows if r["provider"] == c["provider"]
-                   and not (isinstance(r, dict) and "error" in r)), None)
+        ep = next((r for r in rows if "error" not in r
+                   and r["provider"] == c["provider"]), None)
         out.append({
             "model": c["model"],
             "provider": c["provider"],

@@ -23,7 +23,6 @@ CONFIG_PATH = HOME / ".hermes" / "config.yaml"
 
 _stop = threading.Event()
 _thread: threading.Thread | None = None
-_last_state: dict = {}
 
 
 def read_config() -> dict:
@@ -92,7 +91,8 @@ def evaluate_primary() -> dict:
     report = {"ok": bool(res), "chain": primary["name"], "resolution": res,
               "active": current_active(), "auto_apply": primary.get("auto_apply", True)}
 
-    if res and primary.get("auto_apply", True):
+    # applying only makes sense on a host that runs Hermes (~/.hermes exists)
+    if res and primary.get("auto_apply", True) and CONFIG_PATH.parent.exists():
         active = current_active()
         if (res["model"] != active["model"]
                 or res["provider"] != (active["order"][0] if active["order"] else None)):
@@ -106,7 +106,8 @@ def evaluate_primary() -> dict:
                 restart=settings.get("gateway_restart", True))
         else:
             report["applied"] = "unchanged"
-        # telemetry snapshot: what the router is serving right now
+    if res:
+        # telemetry snapshot: what the chain resolves to right now
         store.push_telemetry({
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "model": res["model"],
@@ -134,10 +135,3 @@ def start():
     _thread = threading.Thread(target=_loop, name="pennyroute-engine", daemon=True)
     _thread.start()
 
-
-def stop():
-    _stop.set()
-
-
-def last_state() -> dict:
-    return _last_state

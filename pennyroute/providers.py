@@ -203,8 +203,7 @@ def _estimate_spend(name: str, model: str, usage: dict) -> float:
         return 0.0
 
 
-def record_usage(name: str, model: str, usage: dict | None = None,
-                 stream_ok: bool = True) -> None:
+def record_usage(name: str, model: str, usage: dict | None = None) -> None:
     """Record one successful request against day/month/total windows."""
     usage = usage if isinstance(usage, dict) else None
     now = time.strftime("%Y-%m-%dT%H:%M:%S")

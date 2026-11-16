@@ -6,8 +6,7 @@ or a Bearer authorization header.
 """
 
 import hashlib
-import json
-import os
+import hmac
 import secrets
 import threading
 import time
@@ -64,16 +63,11 @@ def verify_key(raw: str | None) -> bool:
     if raw.startswith("Bearer "):
         raw = raw[7:]
     h = _hash(raw)
-    with _lock:
+    with _lock:  # read-modify-write under one lock so a concurrent revoke is not undone
         keys = _read_json(KEYS_FILE, [])
-    for k in keys:
-        if k["hash"] == h:
-            k["last_used"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-            with _lock:
+        for k in keys:
+            if hmac.compare_digest(k["hash"], h):
+                k["last_used"] = time.strftime("%Y-%m-%dT%H:%M:%S")
                 _write_json(KEYS_FILE, keys)
-            return True
+                return True
     return False
-
-
-def has_any_key() -> bool:
-    return bool(list_keys())

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PennyRoute — one-command installer
+# JAR (Just Another Router) — one-command installer
 #   wget -qO- https://raw.githubusercontent.com/Bohsauro/pennyroute/main/install.sh | bash
 set -euo pipefail
 
@@ -12,7 +12,7 @@ PORT="${PENNY_PORT:-8490}"
 INSTALL_DIR="${PENNY_INSTALL_DIR:-$HOME/pennyroute}"
 SERVICE_NAME="pennyroute"
 
-say "◆ PennyRoute installer"
+say "◆ JAR installer"
 say "  dir : $INSTALL_DIR"
 say "  port: $PORT"
 
@@ -52,6 +52,15 @@ if [ -z "${OPENROUTER_API_KEY:-}" ] && [ ! -f ~/.hermes/.env ] && [ ! -f .env ];
   printf 'OPENROUTER_API_KEY=%s\n' "$ORKEY" > .env
   say "  ✓ saved to .env (chmod 600)"
   chmod 600 .env
+fi
+
+# 3b) admin token: protects the dashboard/management API when served remotely
+if ! grep -qs '^PENNY_ADMIN_TOKEN=.' .env 2>/dev/null; then
+  TOKEN=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
+  printf 'PENNY_ADMIN_TOKEN=%s
+' "$TOKEN" >> .env
+  chmod 600 .env
+  say "  ✓ admin token generated (dashboard password): $TOKEN"
 fi
 
 # 4) systemd service if systemd available

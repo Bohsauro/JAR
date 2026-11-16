@@ -16,6 +16,7 @@ HOME = Path.home()
 ENV_FILE = HOME / ".hermes" / ".env"
 
 ENDPOINTS_TTL = 600
+ERROR_TTL = 30  # failures are retried soon, not cached like good data
 CATALOG_TTL = 3600
 
 _lock = threading.Lock()
@@ -69,7 +70,8 @@ def fetch_endpoints_raw(slug: str, force: bool = False) -> list | dict:
     now = time.time()
     with _lock:
         hit = _cache.get("ep:" + slug)
-        if hit and not force and now - hit["ts"] < ENDPOINTS_TTL:
+        ttl = ERROR_TTL if hit and isinstance(hit["data"], dict) else ENDPOINTS_TTL
+        if hit and not force and now - hit["ts"] < ttl:
             return hit["data"]
 
     enc = urllib.parse.quote(slug, safe="/")
@@ -175,7 +177,8 @@ def fetch_catalog(force: bool = False) -> list | dict:
     now = time.time()
     with _lock:
         hit = _cache.get("catalog")
-        if hit and not force and now - hit["ts"] < CATALOG_TTL:
+        ttl = ERROR_TTL if hit and isinstance(hit["data"], dict) else CATALOG_TTL
+        if hit and not force and now - hit["ts"] < ttl:
             return hit["data"]
     data = _get("https://openrouter.ai/api/v1/models", timeout=60)
     if "__error" in data:
@@ -187,15 +190,3 @@ def fetch_catalog(force: bool = False) -> list | dict:
     return out
 
 
-def search_catalog(query: str, limit: int = 20) -> list:
-    cat = fetch_catalog()
-    if isinstance(cat, dict):
-        return cat
-    q = (query or "").strip().lower()
-    hits = []
-    for m in cat:
-        if not q or q in m["id"].lower() or q in (m["name"] or "").lower():
-            hits.append(m)
-            if len(hits) >= limit:
-                break
-    return hits

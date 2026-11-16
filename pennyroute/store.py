@@ -20,7 +20,10 @@ EVENTS_FILE = DATA_DIR / "events.jsonl"
 TELEMETRY_FILE = DATA_DIR / "telemetry.json"
 TELEMETRY_MAX = 288  # 24h @ 5min
 
-_lock = threading.Lock()
+_lock = threading.RLock()  # re-entrant: routes hold it across load→modify→save
+lock = _lock
+EVENTS_MAX_BYTES = 1_000_000
+EVENTS_KEEP_LINES = 2000
 
 DEFAULT_MODELS = [
     {"slug": "z-ai/glm-5.3-flash", "note": "GLM 5.3 Flash"},
@@ -98,10 +101,6 @@ PRESETS = [
 ]
 
 
-def load_presets() -> list:
-    return PRESETS
-
-
 def list_presets() -> list:
     """Slug-only preset list for the download endpoint, with cost hints."""
     out = []
@@ -163,7 +162,7 @@ def _write_json(path: Path, data):
 
 
 def load_models() -> list:
-    return _read_json(MODELS_FILE, DEFAULT_MODELS)
+    return _read_json(MODELS_FILE, [dict(m) for m in DEFAULT_MODELS])
 
 
 def save_models(models: list):
@@ -172,20 +171,22 @@ def save_models(models: list):
 
 
 def add_model(slug: str, note: str = "") -> bool:
-    models = load_models()
-    if any(m["slug"] == slug for m in models):
-        return False
-    models.append({"slug": slug, "note": note})
-    save_models(models)
-    return True
+    with _lock:
+        models = load_models()
+        if any(m["slug"] == slug for m in models):
+            return False
+        models.append({"slug": slug, "note": note})
+        save_models(models)
+        return True
 
 
 def remove_model(slug: str) -> bool:
-    models = load_models()
-    n = len(models)
-    models = [m for m in models if m["slug"] != slug]
-    save_models(models)
-    return len(models) < n
+    with _lock:
+        models = load_models()
+        n = len(models)
+        models = [m for m in models if m["slug"] != slug]
+        save_models(models)
+        return len(models) < n
 
 
 def normalize_chain(entry: dict) -> dict:
@@ -203,7 +204,7 @@ def normalize_chain(entry: dict) -> dict:
 def load_chains() -> list:
     chains = _read_json(CHAINS_FILE, DEFAULT_CHAINS)
     if not isinstance(chains, list):
-        return DEFAULT_CHAINS
+        chains = DEFAULT_CHAINS
     out = []
     for c in chains:
         c = dict(c)
@@ -234,6 +235,15 @@ def log_event(kind: str, detail: dict):
     with _lock:
         with open(EVENTS_FILE, "a") as f:
             f.write(line + "\n")
+        try:
+            if EVENTS_FILE.stat().st_size > EVENTS_MAX_BYTES:
+                with open(EVENTS_FILE) as f:
+                    keep = f.readlines()[-EVENTS_KEEP_LINES:]
+                tmp = EVENTS_FILE.with_suffix(".jsonl.tmp")
+                tmp.write_text("".join(keep))
+                os.replace(tmp, EVENTS_FILE)
+        except OSError:
+            pass  # trimming is best effort
 
 
 def load_events(limit: int = 100) -> list:

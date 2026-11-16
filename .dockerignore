@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.git/
+.env
+data/
+vault/
+tests/
+.ade/
+.agents/
+.gemini/
+.pytest_cache/

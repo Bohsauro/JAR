@@ -10,9 +10,8 @@ Request model field routing rules:
   - any other value              -> treated as a model id; provider = auto
 """
 
+import asyncio
 import json
-import re
-import time
 
 import httpx
 from fastapi import HTTPException, Request
@@ -100,12 +99,14 @@ async def proxy_chat(request: Request, body: dict):
         chain = {"name": "_passthrough", "entries": [{"type": "model",
                  "model": requested or (store.load_chains()[0]["name"]
                                         if store.load_chains() else "")}]}
-        candidates = build_candidates(chain, settings) if requested else []
+        candidates = (await asyncio.to_thread(build_candidates, chain, settings)
+                      if requested else [])
         if not candidates:
             # unknown model: let the primary chain decide
             chains = store.load_chains()
             primary = next((c for c in chains if c.get("primary")), None)
-            candidates = build_candidates(primary, settings) if primary else []
+            candidates = (await asyncio.to_thread(build_candidates, primary, settings)
+                          if primary else [])
         return await _forward(request, body, candidates)
 
     chains = store.load_chains()
@@ -116,7 +117,8 @@ async def proxy_chat(request: Request, body: dict):
     if not chain:
         raise HTTPException(404, f"chain not found: {chain_name or 'primary'}")
 
-    candidates = build_candidates(chain, settings)
+    # ranking does blocking HTTP: keep it off the event loop
+    candidates = await asyncio.to_thread(build_candidates, chain, settings)
     if not candidates:
         raise HTTPException(502, "no healthy candidate in chain")
     return await _forward(request, body, candidates)
@@ -131,7 +133,7 @@ async def _forward(request: Request, body: dict, candidates: list[dict]):
         pname = cand.get("provider")
         # race guard (spec 1.5): providers may have just exhausted
         if pname:
-            av = providers.is_available(pname)
+            av = await asyncio.to_thread(providers.is_available, pname)
             if not av["available"]:
                 store.log_event("proxy_skip", {
                     "model": cand["model"], "provider": pname,
@@ -156,9 +158,11 @@ async def _forward(request: Request, body: dict, candidates: list[dict]):
                     content=json.dumps(payload).encode(), headers=headers)
                 raw = await client.send(req, stream=True)
                 if raw.status_code >= 400:
+                    detail = (await raw.aread()).decode("utf-8", "replace")[:300]
                     await raw.aclose()
                     await client.aclose()
-                    last_error = f"{raw.status_code} @ {cand['model']}/{pname}"
+                    last_error = (f"{raw.status_code} @ {cand['model']}/{pname}: "
+                                  f"{detail}")
                     continue
                 return StreamingResp(
                     _wrap_stream(raw, cand["model"], pname), client,
@@ -171,7 +175,8 @@ async def _forward(request: Request, body: dict, candidates: list[dict]):
                         "https://openrouter.ai/api/v1/chat/completions",
                         content=json.dumps(payload).encode(), headers=headers)
                 if raw.status_code >= 400:
-                    last_error = f"{raw.status_code} @ {cand['model']}/{pname}"
+                    last_error = (f"{raw.status_code} @ {cand['model']}/{pname}: "
+                                  f"{raw.text[:300]}")
                     continue
                 data = raw.json()
                 data.setdefault("pennyroute", {
@@ -179,8 +184,10 @@ async def _forward(request: Request, body: dict, candidates: list[dict]):
                     "chain_tried": len(candidates)})
                 # record usage + remaining headroom for this provider
                 if pname:
-                    providers.record_usage(pname, cand["model"], data.get("usage"))
-                    data["pennyroute"]["provider_usage"] = _provider_usage_summary(pname)
+                    await asyncio.to_thread(providers.record_usage, pname,
+                                            cand["model"], data.get("usage"))
+                    data["pennyroute"]["provider_usage"] = (
+                        await asyncio.to_thread(_provider_usage_summary, pname))
                 return data
         except Exception as e:  # noqa: BLE001
             last_error = f"{type(e).__name__}: {e} @ {cand['model']}/{pname}"

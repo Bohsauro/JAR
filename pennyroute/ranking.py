@@ -140,9 +140,9 @@ def resolve_chain(chain: dict, ranked: list, mix: dict, gates: dict,
             continue  # none available -> whole step skipped, chain continues
 
         # auto: cheapest healthy endpoint across all providers (unchanged)
-        best = _best_endpoint(slug, mix, gates)
-        b = best.get("best")
-        if _ep_ok(b):
+        rows = [r for r in rank_endpoints(slug, mix, gates) if "error" not in r]
+        b = next((r for r in rows if _ep_ok(r)), None)
+        if b:
             return {"index": i, "type": "model", "model": slug,
                     "provider": b["provider"], "blended": b["blended"],
                     "reason": f"cheapest healthy endpoint for {slug}"}

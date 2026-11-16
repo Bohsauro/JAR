@@ -103,11 +103,11 @@ Nel proxy ogni status ≥ 400 fa passare al candidato successivo. Una richiesta 
 
 ### Font dichiarato e font caricato non coincidono
 
-`static/index.html:10` carica **Geist** e **Geist Mono**. `static/style.css` dichiara `--sans: "Hanken Grotesk"` e `--mono: "Hanken Grotesk Mono"`, che la dashboard non carica: si vede il fallback (`Inter` o font di sistema). La landing invece carica Hanken Grotesk.
+Risolto il 2026-11-16 (redesign JAR): `index.html` e la landing caricano Bricolage Grotesque e IBM Plex Mono, gli stessi dichiarati nel CSS.
 
 ### Landing in doppia copia
 
-`static/landing.html` e `docs/index.html` vanno modificate insieme. Vedi [[Frontend SPA#Landing]].
+`static/landing.html` e `docs/index.html` vanno modificate insieme. Vedi [[Frontend SPA#Design system (`style.css`)]]. `docs/index.html` si rigenera dalla landing con logo relativo e link alla dashboard sostituiti da GitHub.
 
 ### Altro
 
@@ -150,3 +150,44 @@ Correzione: `providers.load_usage` applica `_rotated` in lettura a ogni finestra
 Correzione: i chunk passano intatti; la coda di 64 KB è tenuta in byte e decodificata una volta sola a fine stream per estrarre `usage`.
 
 Collegate: [[Dove modificare]], [[Convenzioni e vincoli]], [[Architettura]]
+
+## Corretti il 2026-11-16
+
+Coperti da `tests/test_regressions.py` (`ApiRegressions`) salvo dove indicato. Le voci corrispondenti sopra sono superate.
+
+- `/api/pipeline`: le righe `{"error"}` vengono scartate prima di leggere `provider` (niente più `KeyError`/500).
+- `keys.verify_key`: lettura e scrittura sotto un solo lock (una revoca concorrente non viene annullata); confronto con `hmac.compare_digest`; tolti gli import morti.
+- Preset `free` (vuoto): `POST /api/presets/{name}` risponde 400 se il preset non ha modelli.
+- `store.load_models` restituisce una copia dei default.
+- Polling Overview: si ferma da solo quando `#ov-side` non è più nel DOM (non testato).
+
+Restano aperti: `/api/*` senza auth, race nello store, event loop bloccato, logica di catena duplicata, errori 400 mascherati.
+
+### Secondo giro, 2026-11-16
+
+Test in `MoreRegressions`. Corretti anche:
+
+- Race leggi-modifica-scrivi: `store._lock` è ora `RLock`, esposto come `store.lock`; `add_model`, `remove_model` e tutte le rotte catene/settings lo tengono per tutta la sequenza.
+- `PUT /api/settings`: `mix` validato (chiavi `in/cache/out` numeriche ≥ 0, non tutte zero), soglie ≥ 0, `interval_min` ≥ 1.
+- Proxy: `build_candidates`, `is_available`, `record_usage` girano in `asyncio.to_thread` (event loop libero). Gli errori upstream ≥ 400 includono il messaggio originale (300 caratteri) nel 502 finale.
+- `resolve_chain` (step `model` senza `providers`) passa al prossimo endpoint sano come il proxy.
+- `orclient`: gli errori restano in cache 30 s (`ERROR_TTL`), non 10 min / 1 h.
+- Telemetria registrata anche con `auto_apply: false`.
+- `events.jsonl` tagliato a 2000 righe oltre 1 MB.
+- Font: la dashboard carica Hanken Grotesk e Geist Mono, come dichiarato nel CSS (non verificato a vista).
+- Codice morto rimosso (`load_presets`, `search_catalog`, `has_any_key`, `engine.stop/last_state`, `stream_ok`, `refreshAll`, import inutili).
+
+Restano: `/api/*` senza auth e CORS aperto (scelta di design), `/api/pipeline` che ricalcola il ranking a ogni chiamata, `app.js` da 1400 righe, chiave chat in `localStorage`, nessun rate limit.
+
+### Terzo giro, 2026-11-16: hosting
+
+Tutti in `HostingGuards`. Nuovo modulo `pennyroute/security.py`.
+
+- `/api/*` richiede `PENNY_ADMIN_TOKEN` (header `X-Admin-Token` o `Authorization: Bearer`, confronto a tempo costante). Senza token risponde solo a loopback e **mai** se c'è `X-Forwarded-For` (un proxy locale non apre il servizio). 10 token errati/minuto per IP, poi 429.
+- `/v1/*`: rate limit per IP, `PENNY_RATE_LIMIT` (default 120/min, 0 = off).
+- CORS aperto (`*`) solo con token impostato; senza, nessuna origine esterna.
+- `GET /healthz` pubblico. Avvio: avvisa se mancano chiave OpenRouter o token.
+- La dashboard chiede il token una volta (`localStorage.penny_admin`).
+- L'engine applica a Hermes solo se `~/.hermes` esiste; `/api/apply` risponde 409 altrimenti.
+- `Dockerfile`, `docker-compose.yml`, `.dockerignore`; `install.sh` genera il token. Contatori del rate limit in memoria: un solo worker.
+- Il superato: "API di gestione senza autenticazione" e "Nessun rate limit" nelle sezioni sopra.

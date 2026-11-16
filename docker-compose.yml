@@ -1,0 +1,9 @@
+services:
+  pennyroute:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8490:8490"
+    env_file: .env          # OPENROUTER_API_KEY, PENNY_ADMIN_TOKEN
+    volumes:
+      - ./data:/app/data
