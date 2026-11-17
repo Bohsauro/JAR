@@ -33,7 +33,7 @@ JAR prices every provider on **your** token mix, drops the ones that are slow, f
 
 ## Features
 
-- **Prices on your real traffic.** Every model × provider pair gets one number, dollars per million tokens, weighted by your input / cache-read / output split. The default mix (14% / 85% / 1%) comes from a measured agent workload. Providers that hide their cache price get a pessimistic estimate, marked `≈`.
+- **Prices on your real traffic.** Every model × provider pair gets one number, dollars per million tokens, weighted by your input / cache-read / output split. That split is learned from the `usage` of your last 500 requests (the 14% / 85% / 1% default applies until 20 have been seen), and every request is also priced on its own predicted split: prompt size, expected output for that kind of request, and how much of the conversation is already cached on which provider. Providers that hide their cache price get a pessimistic estimate, marked `≈`.
 - **Health gates.** A provider must reach 45 tokens/s and 99% uptime (both configurable) before it can be picked.
 - **Fallback chains.** Ordered lists such as "free models first, then this model, then the cheapest paid one". JAR uses the first step that has a healthy provider.
 - **Per-request failover.** If a provider errors, the request is retried on the next candidate.
@@ -200,6 +200,7 @@ Changed live in the **Settings** tab and stored in `data/settings.json`:
 ```json
 {
   "mix": { "in": 0.14, "cache": 0.85, "out": 0.01 },
+  "mix_mode": "auto",
   "min_tps": 45,
   "min_uptime": 99.0,
   "interval_min": 5,
@@ -207,7 +208,15 @@ Changed live in the **Settings** tab and stored in `data/settings.json`:
 }
 ```
 
-To measure your own mix, export your OpenRouter activity CSV, add up input, cache-read and output tokens, and enter the percentages.
+With `"mix_mode": "auto"` (default) the ranking uses the mix measured on your last 500 proxied requests, falling back to `mix` until 20 have been seen. `"manual"` always uses `mix`.
+
+Per request, the proxy also predicts that request's own mix before routing it:
+
+- **input tokens**: prompt characters divided by a characters-per-token ratio calibrated on your history;
+- **output tokens**: median completion of recent requests of the same kind (with or without `tools`), capped by `max_tokens`;
+- **cached tokens**: the longest prefix of the conversation sent in the last 10 minutes. Prompt caches live on one provider, so that endpoint is priced with its cache discount and the others at the input price; a provider that holds the cache can win over a cheaper list price.
+
+Candidates are re-ordered by that cost inside each chain step; chain step order and explicit provider orders are never changed. The response carries the estimate in `pennyroute.token_estimate`.
 
 ### Data files
 
@@ -220,6 +229,7 @@ To measure your own mix, export your OpenRouter activity CSV, add up input, cach
 | `data/openrouter_key` | OpenRouter key set from the dashboard (owner-only permissions) |
 | `data/providers.json` | provider budgets, blocks and notes |
 | `data/usage.json` | usage counters, written by the router |
+| `data/tokenmix.json` | token counts of the last 500 requests (no content), for the learned mix |
 | `data/telemetry.json` | routing snapshots for the 24 h trend |
 | `data/events.jsonl` | log of switches and errors, trimmed to 2000 lines past 1 MB |
 
@@ -249,6 +259,7 @@ If `~/.hermes` exists on the host, the engine writes the chosen model and provid
 | `/api/providers` | admin | budgets, blocks and usage |
 | `/api/keys` | admin | create and revoke `/v1` API keys |
 | `GET`, `PUT /api/settings` | admin | engine settings |
+| `GET /api/tokenmix` | admin | learned vs manual token mix and which one is in use |
 | `GET`, `PUT /api/openrouter-key` | admin | key status (never the key) / test and save a new key |
 | `GET /api/events` | admin | event log |
 

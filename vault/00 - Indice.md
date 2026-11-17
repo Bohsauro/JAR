@@ -5,7 +5,7 @@ tags:
   - moc
 versione: 2.0.0
 commit: d2900a6
-aggiornato: 2026-11-15
+aggiornato: 2026-11-17
 ---
 
 # PennyRoute — mappa della codebase
@@ -31,6 +31,7 @@ Router AI "frugale" per OpenRouter: classifica ogni coppia modello × provider p
 | [[engine]] | `engine.py` | 149 | Thread in background: valuta la catena primaria e riscrive la config Hermes |
 | [[notify]] | `notify.py` | 45 | Webhook `PENNY_WEBHOOK_URL` quando cambia la scelta della primaria |
 | [[ranking]] | `ranking.py` | 149 | Costo blended, health gate, risoluzione catena |
+| [[tokenmix]] | `tokenmix.py` | ~230 | Mix token appreso dal traffico + predizione per richiesta e affinità cache |
 | [[providers]] | `providers.py` | 314 | Registro provider, limiti, contatori di utilizzo |
 | [[orclient]] | `orclient.py` | 201 | Client OpenRouter con cache in memoria, classificazione catalogo |
 | [[store]] | `store.py` | 266 | Stato JSON persistente, default, preset |

@@ -92,16 +92,12 @@ class StreamPassthroughTest(unittest.TestCase):
             stream = router_proxy._wrap_stream(upstream, "m", "P")
             return b"".join([chunk async for chunk in stream])
 
-        with mock.patch.object(router_proxy.providers, "record_usage") as record:
+        with mock.patch.object(router_proxy.providers, "record_usage") as record,              mock.patch.object(router_proxy.tokenmix, "observe"):
             out = asyncio.run(collect())
 
         self.assertEqual(out, payload)
         record.assert_called_once_with(
             "P", "m", {"prompt_tokens": 3, "completion_tokens": 2})
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ApiRegressions(unittest.TestCase):
@@ -353,3 +349,74 @@ class EngineAndDashboard(unittest.TestCase):
             report = engine.evaluate_primary()
         self.assertFalse(report["ok"])
         self.assertIn("45 tps", report["reason"])
+
+
+class TokenMixTest(unittest.TestCase):
+    MANUAL = {"mix": {"in": 0.5, "cache": 0.0, "out": 0.5}, "mix_mode": "auto"}
+
+    def setUp(self):
+        from pennyroute import tokenmix
+        self.tm = tokenmix
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        patcher = mock.patch.object(tokenmix, "LOG_FILE", Path(tmp.name) / "tm.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        tokenmix._prefixes.clear()
+
+    def _observe(self, n, body, usage):
+        for _ in range(n):
+            self.tm.observe(body, "m", "P", usage)
+
+    def test_learned_mix_replaces_manual_only_after_enough_samples(self):
+        usage = {"prompt_tokens": 100, "completion_tokens": 10,
+                 "prompt_tokens_details": {"cached_tokens": 80}}
+        self._observe(self.tm.MIN_SAMPLES - 1, {}, usage)
+        self.assertEqual(self.tm.effective(self.MANUAL), self.MANUAL["mix"])
+
+        self._observe(1, {}, usage)
+        mix = self.tm.effective(self.MANUAL)
+        self.assertAlmostEqual(mix["cache"], 80 / 110)
+        self.assertAlmostEqual(mix["out"], 10 / 110)
+        self.assertEqual(self.tm.effective({**self.MANUAL, "mix_mode": "manual"}),
+                         self.MANUAL["mix"])
+
+    def test_output_estimate_uses_same_kind_median_capped_by_max_tokens(self):
+        tools = {"tools": [{"type": "function"}]}
+        self._observe(3, tools, {"prompt_tokens": 10, "completion_tokens": 50})
+        self._observe(3, {}, {"prompt_tokens": 10, "completion_tokens": 900})
+
+        self.assertEqual(self.tm.predict(tools, self.MANUAL)["out"], 50)
+        self.assertEqual(self.tm.predict({}, self.MANUAL)["out"], 900)
+        self.assertEqual(self.tm.predict({"max_tokens": 64}, self.MANUAL)["out"], 64)
+
+    def test_continued_conversation_prefers_the_endpoint_holding_its_cache(self):
+        first = {"messages": [{"role": "system", "content": "x" * 40000},
+                              {"role": "user", "content": "hi"}]}
+        self.tm.remember(first, "m", "B")
+        follow = {"messages": first["messages"] + [
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "more"}]}
+
+        pred = self.tm.predict(follow, self.MANUAL)
+        self.assertEqual(pred["affinity"], ["m", "B"])
+        self.assertGreater(pred["cached"], 0.9 * pred["in"])
+
+        price = lambda i, c: {"in": i, "cache": c, "out": 1.0}
+        cands = [{"model": "m", "provider": "A", "step": 0, "price": price(1.0, 0.1)},
+                 {"model": "m", "provider": "B", "step": 0, "price": price(1.2, 0.1)},
+                 {"model": "z", "provider": "C", "step": 1, "price": price(0.0, 0.0)}]
+        ordered = self.tm.order(cands, pred)
+        self.assertEqual([c["provider"] for c in ordered], ["B", "A", "C"])
+
+    def test_explicit_provider_order_is_never_resorted(self):
+        cands = [{"model": "m", "provider": "A", "step": 0, "ordered": True,
+                  "price": {"in": 9, "cache": 9, "out": 9}},
+                 {"model": "m", "provider": "B", "step": 0, "ordered": True,
+                  "price": {"in": 0, "cache": 0, "out": 0}}]
+        pred = {"in": 100, "cached": 0, "out": 10, "affinity": None}
+        self.assertEqual([c["provider"] for c in self.tm.order(cands, pred)], ["A", "B"])
+
+
+if __name__ == "__main__":
+    unittest.main()

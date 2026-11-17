@@ -19,6 +19,7 @@ from . import ranking
 from . import router_proxy
 from . import security
 from . import store
+from . import tokenmix
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -86,12 +87,12 @@ def v1_models(request: Request):
     _require_key(request)
     # what the primary chain would serve right now
     settings = store.load_settings()
-    ranked = ranking.rank_models(store.load_models(), settings["mix"],
+    ranked = ranking.rank_models(store.load_models(), tokenmix.effective(settings),
                                  {"min_tps": settings["min_tps"],
                                   "min_uptime": settings["min_uptime"]})
     chains = store.load_chains()
     primary = next((c for c in chains if c.get("primary")), None)
-    res = ranking.resolve_chain(primary, ranked, settings["mix"],
+    res = ranking.resolve_chain(primary, ranked, tokenmix.effective(settings),
                                 {"min_tps": settings["min_tps"],
                                  "min_uptime": settings["min_uptime"]}) if primary else None
     served = res["model"] if res else None
@@ -196,17 +197,17 @@ def api_reset_provider(name: str):
 @app.get("/api/rank")
 def api_rank(force: bool = False):
     settings = store.load_settings()
-    ranked = ranking.rank_models(store.load_models(), settings["mix"],
+    ranked = ranking.rank_models(store.load_models(), tokenmix.effective(settings),
                                  {"min_tps": settings["min_tps"],
                                   "min_uptime": settings["min_uptime"]},
                                  force=force)
-    return {"models": ranked, "mix": settings["mix"]}
+    return {"models": ranked, "mix": tokenmix.effective(settings)}
 
 
 @app.get("/api/endpoints/{slug:path}")
 def api_endpoints(slug: str, force: bool = False):
     settings = store.load_settings()
-    rows = ranking.rank_endpoints(slug, settings["mix"],
+    rows = ranking.rank_endpoints(slug, tokenmix.effective(settings),
                                   {"min_tps": settings["min_tps"],
                                    "min_uptime": settings["min_uptime"]},
                                   force=force)
@@ -214,7 +215,7 @@ def api_endpoints(slug: str, force: bool = False):
         for r in rows:
             if isinstance(r, dict) and "error" not in r:
                 r["available"] = providers.is_available(r["provider"])["available"]
-    return {"slug": slug, "mix": settings["mix"], "endpoints": rows}
+    return {"slug": slug, "mix": tokenmix.effective(settings), "endpoints": rows}
 
 
 _FAMILY_FACET_TOP = 30
@@ -453,6 +454,7 @@ def api_evaluate():
 
 class SettingsIn(BaseModel):
     mix: dict | None = None
+    mix_mode: str | None = None
     min_tps: float | None = None
     min_uptime: float | None = None
     interval_min: int | None = None
@@ -480,6 +482,8 @@ def api_settings():
 def api_set_settings(s: SettingsIn):
     if s.mix is not None:
         _validate_mix(s.mix)
+    if s.mix_mode is not None and s.mix_mode not in tokenmix.MIX_MODES:
+        raise HTTPException(400, f"mix_mode must be one of {', '.join(tokenmix.MIX_MODES)}")
     for k in ("min_tps", "min_uptime"):
         if getattr(s, k) is not None and getattr(s, k) < 0:
             raise HTTPException(400, f"{k} must be >= 0")
@@ -489,11 +493,17 @@ def api_set_settings(s: SettingsIn):
         cur = store.load_settings()
         if s.mix:
             cur["mix"] = {k: float(s.mix[k]) for k in _MIX_KEYS}
-        for k in ("min_tps", "min_uptime", "interval_min", "gateway_restart"):
+        for k in ("mix_mode", "min_tps", "min_uptime", "interval_min", "gateway_restart"):
             if getattr(s, k) is not None:
                 cur[k] = getattr(s, k)
         store.save_settings(cur)
     return {"ok": True, "settings": cur}
+
+
+@app.get("/api/tokenmix")
+def api_tokenmix():
+    """Learned vs manual token mix, and which one ranking uses now."""
+    return tokenmix.stats(store.load_settings())
 
 
 # ------------------------------------------------------- openrouter key ---
@@ -563,12 +573,12 @@ def api_revoke_key(key_id: str):
 def api_resolve():
     """What the primary chain would serve right now (for the API page)."""
     settings = store.load_settings()
-    ranked = ranking.rank_models(store.load_models(), settings["mix"],
+    ranked = ranking.rank_models(store.load_models(), tokenmix.effective(settings),
                                  {"min_tps": settings["min_tps"],
                                   "min_uptime": settings["min_uptime"]})
     chains = store.load_chains()
     primary = next((c for c in chains if c.get("primary")), None)
-    res = ranking.resolve_chain(primary, ranked, settings["mix"],
+    res = ranking.resolve_chain(primary, ranked, tokenmix.effective(settings),
                                 {"min_tps": settings["min_tps"],
                                  "min_uptime": settings["min_uptime"]}) if primary else None
     return {"resolution": res, "key_count": len(keys.list_keys())}
@@ -586,7 +596,7 @@ def api_pipeline():
     cands = router_proxy.build_candidates(primary, settings)
     out = []
     for c in cands[:6]:
-        rows = ranking.rank_endpoints(c["model"], settings["mix"],
+        rows = ranking.rank_endpoints(c["model"], tokenmix.effective(settings),
                                       {"min_tps": settings["min_tps"],
                                        "min_uptime": settings["min_uptime"]})
         ep = next((r for r in rows if "error" not in r

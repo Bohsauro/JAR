@@ -18,6 +18,7 @@ import yaml
 from . import notify
 from . import ranking
 from . import store
+from . import tokenmix
 
 HOME = Path.home()
 CONFIG_PATH = HOME / ".hermes" / "config.yaml"
@@ -83,10 +84,11 @@ def evaluate_primary() -> dict:
     if not models:
         return {"ok": False, "reason": "watchlist empty"}
 
-    ranked = ranking.rank_models(models, settings["mix"],
+    mix = tokenmix.effective(settings)
+    ranked = ranking.rank_models(models, mix,
                                  {"min_tps": settings["min_tps"],
                                   "min_uptime": settings["min_uptime"]})
-    res = ranking.resolve_chain(primary, ranked, settings["mix"],
+    res = ranking.resolve_chain(primary, ranked, mix,
                                 {"min_tps": settings["min_tps"],
                                  "min_uptime": settings["min_uptime"]})
     report = {"ok": bool(res), "chain": primary["name"], "resolution": res,

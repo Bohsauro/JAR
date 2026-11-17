@@ -12,12 +12,15 @@ Request model field routing rules:
 
 import asyncio
 import json
+import logging
 
 import httpx
 from fastapi import HTTPException, Request
 
-from . import orclient, providers, ranking
+from . import orclient, providers, ranking, tokenmix
 from . import store
+
+log = logging.getLogger("pennyroute")
 
 
 def _prov_ok(name: str) -> bool:
@@ -25,7 +28,8 @@ def _prov_ok(name: str) -> bool:
     return bool(providers.is_available(name).get("available"))
 
 
-def build_candidates(chain: dict, settings: dict) -> list[dict]:
+def build_candidates(chain: dict, settings: dict, mix: dict | None = None,
+                     affinity: list | None = None) -> list[dict]:
     """Ordered candidate list for a chain: [(model, provider), ...].
 
     Within a chain step, all eligible (healthy + available) endpoints of the
@@ -33,20 +37,32 @@ def build_candidates(chain: dict, settings: dict) -> list[dict]:
     tries the next provider of the SAME model before falling through to the
     next chain step. `model` entries with `providers` add one candidate per
     provider in order (first available+healthy wins at forward time).
+
+    `mix` ranks costs (default: the effective learned/manual mix). `affinity`
+    [model, provider] holds this conversation's prompt cache: a `cheapest`
+    step also offers it, so `tokenmix.order` can weigh the cache discount.
+    Each candidate carries `step`, `ordered` (explicit provider order) and
+    `price` for that re-ordering.
     """
-    mix = settings["mix"]
+    mix = mix or tokenmix.effective(settings)
     gates = {"min_tps": settings["min_tps"], "min_uptime": settings["min_uptime"]}
     ranked = ranking.rank_models(store.load_models(), mix, gates)
     out: list[dict] = []
     seen: set = set()
 
-    def add(slug: str, provider: str | None):
-        key = (slug, provider)
+    def endpoints(slug: str) -> list:
+        return [e for e in ranking.rank_endpoints(slug, mix, gates)
+                if not (isinstance(e, dict) and "error" in e)]
+
+    def add(slug: str, row: dict, step: int, ordered: bool = False):
+        key = (slug, row["provider"])
         if key not in seen:
             seen.add(key)
-            out.append({"model": slug, "provider": provider})
+            out.append({"model": slug, "provider": row["provider"], "step": step,
+                        "ordered": ordered,
+                        "price": {k: row[k] for k in ("in", "cache", "out")}})
 
-    for entry in chain.get("entries") or []:
+    for step, entry in enumerate(chain.get("entries") or []):
         if entry.get("type") == "cheapest":
             flt = entry.get("filter") or ""
             restrict = entry.get("providers")
@@ -59,33 +75,52 @@ def build_candidates(chain: dict, settings: dict) -> list[dict]:
                     continue
                 if restrict and b["provider"] not in restrict:
                     continue
-                add(m["slug"], b["provider"])
+                add(m["slug"], b, step)
+            if affinity and any(m["slug"] == affinity[0] for m in pool):
+                row = next((e for e in endpoints(affinity[0])
+                            if e["provider"] == affinity[1] and e["healthy"]), None)
+                if (row and _prov_ok(row["provider"])
+                        and (not restrict or row["provider"] in restrict)):
+                    add(affinity[0], row, step)
         else:
             slug = entry.get("model")
             if not slug:
                 continue
-            eps = [e for e in ranking.rank_endpoints(slug, mix, gates)
-                   if not (isinstance(e, dict) and "error" in e)]
+            eps = endpoints(slug)
             provs = entry.get("providers")
             if provs:
                 # ordered preference: one candidate per available+healthy provider
                 for pname in provs:
-                    if _prov_ok(pname) and any(
-                            e["provider"] == pname and e["healthy"] for e in eps):
-                        add(slug, pname)
+                    row = next((e for e in eps
+                                if e["provider"] == pname and e["healthy"]), None)
+                    if row and _prov_ok(pname):
+                        add(slug, row, step, ordered=True)
             else:
                 # auto: all healthy, available endpoints
                 for e in eps:
                     if e["healthy"] and _prov_ok(e["provider"]):
-                        add(slug, e["provider"])
+                        add(slug, e, step)
     return out
+
+
+def _plan(chain: dict, settings: dict, pred: dict) -> list[dict]:
+    """Candidates ranked for this request's predicted token mix."""
+    return tokenmix.order(
+        build_candidates(chain, settings, pred["mix"], pred["affinity"]), pred)
+
+
+def _record(provider: str, model: str, usage, body: dict, pred: dict | None):
+    providers.record_usage(provider, model, usage)
+    try:  # learning must never fail a request that was already served
+        tokenmix.observe(body, model, provider, usage, pred)
+    except Exception:  # noqa: BLE001
+        log.exception("token mix observation failed")
 
 
 async def proxy_chat(request: Request, body: dict):
     """Forward a chat completion through the chain. Returns httpx.Response."""
     settings = store.load_settings()
-    mix = settings["mix"]
-    gates = {"min_tps": settings["min_tps"], "min_uptime": settings["min_uptime"]}
+    pred = await asyncio.to_thread(tokenmix.predict, body, settings)
 
     requested = (body.get("model") or "").strip()
     if requested.startswith("penny:"):
@@ -99,15 +134,15 @@ async def proxy_chat(request: Request, body: dict):
         chain = {"name": "_passthrough", "entries": [{"type": "model",
                  "model": requested or (store.load_chains()[0]["name"]
                                         if store.load_chains() else "")}]}
-        candidates = (await asyncio.to_thread(build_candidates, chain, settings)
+        candidates = (await asyncio.to_thread(_plan, chain, settings, pred)
                       if requested else [])
         if not candidates:
             # unknown model: let the primary chain decide
             chains = store.load_chains()
             primary = next((c for c in chains if c.get("primary")), None)
-            candidates = (await asyncio.to_thread(build_candidates, primary, settings)
+            candidates = (await asyncio.to_thread(_plan, primary, settings, pred)
                           if primary else [])
-        return await _forward(request, body, candidates)
+        return await _forward(request, body, candidates, pred)
 
     chains = store.load_chains()
     if chain_name:
@@ -118,13 +153,14 @@ async def proxy_chat(request: Request, body: dict):
         raise HTTPException(404, f"chain not found: {chain_name or 'primary'}")
 
     # ranking does blocking HTTP: keep it off the event loop
-    candidates = await asyncio.to_thread(build_candidates, chain, settings)
+    candidates = await asyncio.to_thread(_plan, chain, settings, pred)
     if not candidates:
         raise HTTPException(502, "no healthy candidate in chain")
-    return await _forward(request, body, candidates)
+    return await _forward(request, body, candidates, pred)
 
 
-async def _forward(request: Request, body: dict, candidates: list[dict]):
+async def _forward(request: Request, body: dict, candidates: list[dict],
+                   pred: dict | None = None):
     """Try candidates in order. Streams through on success."""
     last_error = None
     stream = bool(body.get("stream"))
@@ -165,7 +201,7 @@ async def _forward(request: Request, body: dict, candidates: list[dict]):
                                   f"{detail}")
                     continue
                 return StreamingResp(
-                    _wrap_stream(raw, cand["model"], pname), client,
+                    _wrap_stream(raw, cand["model"], pname, body, pred), client,
                     status_code=raw.status_code, headers=dict(raw.headers),
                     media_type=raw.headers.get("content-type"))
             else:
@@ -182,10 +218,13 @@ async def _forward(request: Request, body: dict, candidates: list[dict]):
                 data.setdefault("pennyroute", {
                     "served_by": f"{cand['model']} @ {pname}",
                     "chain_tried": len(candidates)})
+                if pred:
+                    data["pennyroute"]["token_estimate"] = {
+                        k: round(pred[k]) for k in ("in", "cached", "out")}
                 # record usage + remaining headroom for this provider
                 if pname:
-                    await asyncio.to_thread(providers.record_usage, pname,
-                                            cand["model"], data.get("usage"))
+                    await asyncio.to_thread(_record, pname, cand["model"],
+                                            data.get("usage"), body, pred)
                     data["pennyroute"]["provider_usage"] = (
                         await asyncio.to_thread(_provider_usage_summary, pname))
                 return data
@@ -237,7 +276,8 @@ def _provider_usage_summary(name: str) -> dict:
     return out
 
 
-async def _wrap_stream(raw, model: str, provider: str):
+async def _wrap_stream(raw, model: str, provider: str, body: dict | None = None,
+                       pred: dict | None = None):
     """Buffer a 64 KB rolling tail; record usage at end. Chunks pass through
     untouched: decoding per chunk would drop multibyte chars split across two."""
     tail = b""
@@ -247,8 +287,8 @@ async def _wrap_stream(raw, model: str, provider: str):
             yield chunk
     finally:
         try:
-            providers.record_usage(provider, model, _usage_from_tail(
-                tail.decode("utf-8", errors="ignore")))
+            _record(provider, model, _usage_from_tail(
+                tail.decode("utf-8", errors="ignore")), body or {}, pred)
         except Exception:  # noqa: BLE001 — usage is best effort
             pass
 

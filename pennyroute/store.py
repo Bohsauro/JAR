@@ -139,6 +139,7 @@ DEFAULT_CHAINS = [
 
 DEFAULT_SETTINGS = {
     "mix": {"in": 0.14, "cache": 0.85, "out": 0.01},
+    "mix_mode": "auto",  # "auto": rank with the mix learned from traffic
     "min_tps": 45,
     "min_uptime": 99.0,
     "interval_min": 5,

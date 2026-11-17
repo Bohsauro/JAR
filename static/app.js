@@ -315,18 +315,38 @@ async function loadOverview() {
 }
 
 function mixControls(id) {
-  const m = STATE.settings.mix;
+  const m = STATE.settings.mix, mode = STATE.settings.mix_mode || "auto";
   return `<div class="row-ctl">
+    <div><label class="field" for="${id}-mode">Mix source</label><select id="${id}-mode">
+      <option value="auto" ${mode === "auto" ? "selected" : ""}>Learned from recent requests</option>
+      <option value="manual" ${mode === "manual" ? "selected" : ""}>Manual</option></select></div>
+  </div>
+  <div class="hint" id="${id}-learned" style="margin:6px 0"><span class="spinner"></span></div>
+  <div class="row-ctl">
     <div><label class="field">Input %</label><input type="number" id="${id}-in" value="${Math.round(m.in * 100)}" min="0" max="100"></div>
     <div><label class="field">Cache %</label><input type="number" id="${id}-cache" value="${Math.round(m.cache * 100)}" min="0" max="100"></div>
     <div><label class="field">Output %</label><input type="number" id="${id}-out" value="${Math.round(m.out * 100)}" min="0" max="100"></div>
-  </div>`;
+  </div>
+  <div class="hint">Manual values are used in manual mode, and in auto mode until enough requests are seen. Each request is also ranked on its own predicted mix (prompt size, expected output, conversation cache).</div>`;
+}
+
+async function loadMixInfo(id) {
+  const el = $("#" + id + "-learned");
+  try {
+    const t = await api("/api/tokenmix");
+    const pct = m => m ? `${Math.round(m.in * 100)} / ${Math.round(m.cache * 100)} / ${Math.round(m.out * 100)}` : "—";
+    el.innerHTML = t.source === "learned"
+      ? `<span class="badge ok">learned</span> ranking on ${pct(t.learned)} (in / cache / out) from the last ${t.samples} requests`
+      : t.mode === "auto"
+        ? `<span class="badge">learning</span> ${t.samples}/${t.min_samples} requests seen (so far ${pct(t.learned)}); using the manual mix meanwhile`
+        : `<span class="badge">manual</span> learned from traffic: ${pct(t.learned)} (${t.samples} requests)`;
+  } catch (e) { el.textContent = e.message; }
 }
 
 function viewRanking() {
   $("#view").innerHTML = `
     <div class="page-head">
-      <div><h1>Ranking</h1><div class="sub">Blended $/M per 1M total tokens under your real token mix. Health gate: tps ≥ ${STATE.settings.min_tps}, uptime ≥ ${STATE.settings.min_uptime}%.</div></div>
+      <div><h1>Ranking</h1><div class="sub">Blended $/M per 1M total tokens under your token mix. Health gate: tps ≥ ${STATE.settings.min_tps}, uptime ≥ ${STATE.settings.min_uptime}%.</div></div>
       <div><button class="ghost" id="btn-refresh">↻ Refresh</button></div>
     </div>
     <div class="panel"><h2><span class="k">Token mix</span></h2><div style="max-width:560px">${mixControls("mix")}</div></div>
@@ -342,13 +362,19 @@ function viewRanking() {
     RANKED = (await api("/api/rank?force=true")).models;
     renderRankRows();
   };
+  const saveMix = async patch => {
+    const r = await api("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+    STATE.settings = r.settings;
+    RANKED = (await api("/api/rank")).models;
+    renderRankRows();
+    loadMixInfo("mix");
+  };
+  loadMixInfo("mix");
+  $("#mix-mode").onchange = () => saveMix({ mix_mode: $("#mix-mode").value }).catch(e => toast(e.message, true));
   ["in", "cache", "out"].forEach(k => $("#mix-" + k).oninput = async () => {
     const mi = +$("#mix-in").value / 100, mc = +$("#mix-cache").value / 100, mo = +$("#mix-out").value / 100;
     if (Math.abs(mi + mc + mo - 1) > 0.011) return;
-    await api("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mix: { in: mi, cache: mc, out: mo } }) });
-    STATE.settings.mix = { in: mi, cache: mc, out: mo };
-    RANKED = (await api("/api/rank")).models;
-    renderRankRows();
+    await saveMix({ mix: { in: mi, cache: mc, out: mo } }).catch(e => toast(e.message, true));
   });
 }
 
@@ -1395,7 +1421,7 @@ function viewSettings() {
       <div class="hint">Tested against OpenRouter before it is saved in <code>data/</code>. It is never shown again.</div>
       <div style="margin-top:14px"><button class="primary" id="btn-or-key">Test &amp; save key</button></div></div>
     <div class="panel"><h2>Cost model</h2>
-      <div class="hint" style="margin-bottom:6px">Blended $/M = in_f · input + cache_f · cache + out_f · output. Defaults from your measured month: 14 / 85 / 1.</div>
+      <div class="hint" style="margin-bottom:6px">Blended $/M = in_f · input + cache_f · cache + out_f · output.</div>
       ${mixControls("s")}
     </div>
     <div class="panel"><h2>Health gates</h2>
@@ -1408,6 +1434,7 @@ function viewSettings() {
       <label class="switch"><input type="checkbox" id="s-restart" ${s.gateway_restart ? "checked" : ""}> Restart gateway after switching (required for the new pin to take effect)</label>
       <div style="margin-top:14px"><button class="primary" id="btn-save">Save settings</button></div></div>`;
   ["in", "cache", "out"].forEach(k => $("#s-" + k).value = Math.round(STATE.settings.mix[k] * 100));
+  loadMixInfo("s");
   const showKeyStatus = st => {
     $("#or-status").innerHTML = st.configured
       ? `<span class="badge ok">configured</span> from ${esc(st.source)}`
@@ -1429,11 +1456,13 @@ function viewSettings() {
     try {
       const body = {
         mix: { in: +$("#s-in").value / 100, cache: +$("#s-cache").value / 100, out: +$("#s-out").value / 100 },
+        mix_mode: $("#s-mode").value,
         min_tps: +$("#s-tps").value, min_uptime: +$("#s-up").value,
         interval_min: +$("#s-int").value, gateway_restart: $("#s-restart").checked,
       };
       const r = await api("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       STATE.settings = r.settings;
+      loadMixInfo("s");
       toast("Settings saved");
     } catch (e) { toast(e.message, true); }
   };

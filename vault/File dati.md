@@ -101,3 +101,8 @@ Buffer circolare di `TELEMETRY_MAX` = 288 punti. Scritto dall'[[engine]] a ogni 
 - `.env` nella directory di lavoro — chiave OpenRouter (in `.gitignore`).
 
 Collegate: [[store]], [[providers]], [[keys]], [[Deploy e configurazione]]
+
+
+## `tokenmix.json` (2026-11-17)
+
+Lista JSON, ultime 500 richieste servite dal proxy: `{ts, kind: "chat"|"tools", chars, in, cached, out, model, provider}`. Scritto da [[tokenmix]] `observe()`. `settings.json` ha in più `mix_mode: "auto"|"manual"`.
