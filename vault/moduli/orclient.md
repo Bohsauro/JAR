@@ -10,14 +10,17 @@ file: pennyroute/orclient.py
 
 Client di sola lettura verso OpenRouter, con cache in memoria. Usa `urllib` della libreria standard (sincrono, bloccante). Non importa altri moduli del pacchetto.
 
-## Chiave OpenRouter — `get_key()` (riga 25)
+## Chiave OpenRouter — `_key_lookup()` / `get_key()` / `key_source()`
 
-Ordine di ricerca:
+Ordine di ricerca (`_key_lookup` restituisce `(sorgente, chiave)`):
 
-1. variabile d'ambiente `OPENROUTER_API_KEY`
-2. `.env` nella **directory di lavoro corrente** (`Path.cwd()`, non la cartella del repo)
-3. `~/.hermes/.env`
-4. stringa vuota (le chiamate partono senza header di autorizzazione)
+1. `data/openrouter_key` (`SAVED_KEY_FILE`), scritta dalla GUI → sorgente `dashboard`
+2. variabile d'ambiente `OPENROUTER_API_KEY` → `environment`
+3. `.env` nella **directory di lavoro corrente** (`Path.cwd()`, non la cartella del repo) → `.env`
+4. `~/.hermes/.env` → `hermes`
+5. stringa vuota (le chiamate partono senza header di autorizzazione)
+
+`test_key(key)` chiama `GET /api/v1/key` con `httpx` (10 s) e restituisce `(ok, motivo)` senza mai ripetere la chiave. `save_key(key)` scrive in modo atomico con permessi 600.
 
 Usata anche da [[router_proxy]] per le chat completions.
 

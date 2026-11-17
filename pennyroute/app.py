@@ -53,7 +53,7 @@ async def guard(request: Request, call_next):
 @app.on_event("startup")
 def _startup():
     if not orclient.get_key():
-        log.warning("no OpenRouter key found: set OPENROUTER_API_KEY, requests will fail")
+        log.warning("no OpenRouter key: set one in Settings or OPENROUTER_API_KEY, requests will fail")
     if not security.admin_token():
         log.warning("PENNY_ADMIN_TOKEN not set: management API (/api) is local-only")
     engine.start()
@@ -494,6 +494,36 @@ def api_set_settings(s: SettingsIn):
                 cur[k] = getattr(s, k)
         store.save_settings(cur)
     return {"ok": True, "settings": cur}
+
+
+# ------------------------------------------------------- openrouter key ---
+
+KEY_MAX_LEN = 256
+
+
+class OpenRouterKeyIn(BaseModel):
+    key: str
+
+
+@app.get("/api/openrouter-key")
+def api_openrouter_key():
+    """Whether a key is set and where it comes from. Never the key itself."""
+    source = orclient.key_source()
+    return {"configured": source is not None, "source": source}
+
+
+@app.put("/api/openrouter-key")
+def api_set_openrouter_key(body: OpenRouterKeyIn):
+    key = body.key.strip()
+    if not key or len(key) > KEY_MAX_LEN or any(c.isspace() or not c.isprintable()
+                                                 for c in key):
+        raise HTTPException(400, "key must be 1-256 printable characters, no spaces")
+    ok, reason = orclient.test_key(key)
+    if not ok:
+        raise HTTPException(400, reason)
+    orclient.save_key(key)
+    store.log_event("openrouter_key_set", {})
+    return {"ok": True, "configured": True, "source": "dashboard"}
 
 
 # --------------------------------------------------------------- events ---

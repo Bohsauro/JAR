@@ -48,6 +48,28 @@ class UsageWindowTest(unittest.TestCase):
         self.assertEqual(providers.is_available("P"),
                          {"available": False, "reasons": ["requests/day exhausted"]})
 
+    def test_spend_uses_openrouter_reported_cost_over_estimate(self):
+        self._with_files({})
+        usage = {"prompt_tokens": 1000, "completion_tokens": 10, "cost": 0.0123}
+
+        with mock.patch.object(providers.orclient, "fetch_endpoints_raw") as prices:
+            providers.record_usage("P", "m/x", usage)
+
+        prices.assert_not_called()
+        self.assertEqual(providers.load_usage()["P"]["total"]["spend"], 0.0123)
+
+    def test_spend_falls_back_to_list_price_without_cost(self):
+        self._with_files({})
+        row = {"provider": "P", "in": 2.0, "cache": None, "out": 10.0}
+
+        with mock.patch.object(providers.orclient, "fetch_endpoints_raw",
+                               return_value=[row]):
+            providers.record_usage("P", "m/x", {"prompt_tokens": 1000,
+                                                "completion_tokens": 100})
+
+        # (2.0 * 1000 + 10.0 * 100) / 1e6
+        self.assertEqual(providers.load_usage()["P"]["total"]["spend"], 0.003)
+
 
 class _FakeUpstream:
     def __init__(self, chunks: list[bytes]):
@@ -198,3 +220,115 @@ class HostingGuards(unittest.TestCase):
     def test_healthz_is_open(self):
         from pennyroute import app as appmod
         self.assertEqual(_client(appmod.app, "10.0.0.8").get("/healthz").status_code, 200)
+
+
+class RouteChangeNotifications(unittest.TestCase):
+    def _evaluate(self, last_point, resolution, webhook="https://hooks.example/x"):
+        from pennyroute import engine, notify
+        primary = {"name": "main", "primary": True, "auto_apply": False, "entries": []}
+        settings = {"mix": {}, "min_tps": 0, "min_uptime": 0}
+        env = {"PENNY_WEBHOOK_URL": webhook} if webhook else {}
+        with mock.patch.dict("os.environ", env, clear=False), \
+             mock.patch.object(engine.store, "load_settings", return_value=settings), \
+             mock.patch.object(engine.store, "load_models", return_value=["m"]), \
+             mock.patch.object(engine.store, "load_chains", return_value=[primary]), \
+             mock.patch.object(engine.store, "load_telemetry",
+                               return_value=[last_point] if last_point else []), \
+             mock.patch.object(engine.store, "push_telemetry"), \
+             mock.patch.object(engine.store, "log_event"), \
+             mock.patch.object(engine.ranking, "rank_models", return_value=[]), \
+             mock.patch.object(engine.ranking, "resolve_chain", return_value=resolution), \
+             mock.patch.object(notify.httpx, "post") as post:
+            if not webhook:
+                import os
+                os.environ.pop("PENNY_WEBHOOK_URL", None)
+            engine.evaluate_primary()
+        return post
+
+    def test_route_change_posts_webhook(self):
+        post = self._evaluate({"model": "a", "provider": "P", "blended": 1.0},
+                              {"model": "b", "provider": "Q", "blended": 0.5,
+                               "reason": "cheaper"})
+
+        post.assert_called_once()
+        body = post.call_args.kwargs["json"]
+        self.assertIn("a @ P", body["text"])
+        self.assertIn("b @ Q", body["text"])
+        self.assertEqual(body["text"], body["content"])  # Slack/Telegram + Discord
+
+    def test_same_route_does_not_notify(self):
+        post = self._evaluate({"model": "a", "provider": "P", "blended": 1.0},
+                              {"model": "a", "provider": "P", "blended": 0.9,
+                               "reason": "x"})
+        post.assert_not_called()
+
+    def test_first_evaluation_does_not_notify(self):
+        post = self._evaluate(None, {"model": "a", "provider": "P", "blended": 1.0,
+                                     "reason": "x"})
+        post.assert_not_called()
+
+    def test_no_webhook_configured_does_not_notify(self):
+        post = self._evaluate({"model": "a", "provider": "P", "blended": 1.0},
+                              {"model": "b", "provider": "Q", "blended": 0.5,
+                               "reason": "x"}, webhook=None)
+        post.assert_not_called()
+
+    def test_webhook_failure_is_logged_without_leaking_url(self):
+        from pennyroute import notify
+        with mock.patch.dict("os.environ", {"PENNY_WEBHOOK_URL": "https://h/secret-token"}), \
+             mock.patch.object(notify.httpx, "post", side_effect=OSError("boom https://h/secret-token")), \
+             mock.patch.object(notify.store, "log_event") as log:
+            notify.route_changed({"model": "a", "provider": "P"},
+                                 {"model": "b", "provider": "Q", "blended": 0.5})
+        kind, detail = log.call_args.args
+        self.assertEqual(kind, "notify_error")
+        self.assertNotIn("secret-token", json.dumps(detail))
+
+
+class OpenRouterKeyFromDashboard(unittest.TestCase):
+    def setUp(self):
+        from pennyroute import orclient
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.key_file = Path(tmp.name) / "openrouter_key"
+        for patcher in (mock.patch.object(orclient, "SAVED_KEY_FILE", self.key_file),
+                        mock.patch.dict("os.environ", {"OPENROUTER_API_KEY": "sk-or-env"})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        from pennyroute import app as appmod
+        self.orclient = orclient
+        self.c = _client(appmod.app)
+
+    def test_valid_key_is_tested_saved_and_never_returned(self):
+        with mock.patch.object(self.orclient, "test_key", return_value=(True, "")) as t:
+            r = self.c.put("/api/openrouter-key", json={"key": " sk-or-NEW "})
+
+        t.assert_called_once_with("sk-or-NEW")
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn("sk-or-NEW", r.text)
+        self.assertEqual(self.key_file.read_text().strip(), "sk-or-NEW")
+        self.assertEqual(self.orclient.get_key(), "sk-or-NEW")  # beats the env var
+        status = self.c.get("/api/openrouter-key")
+        self.assertEqual(status.json(), {"configured": True, "source": "dashboard"})
+        self.assertNotIn("sk-or", status.text)
+
+    def test_rejected_key_is_not_saved(self):
+        with mock.patch.object(self.orclient, "test_key",
+                               return_value=(False, "OpenRouter rejected the key")):
+            r = self.c.put("/api/openrouter-key", json={"key": "sk-or-BAD"})
+
+        self.assertEqual(r.status_code, 400)
+        self.assertNotIn("sk-or-BAD", r.text)
+        self.assertFalse(self.key_file.exists())
+        self.assertEqual(self.orclient.get_key(), "sk-or-env")
+
+    def test_malformed_key_is_rejected_before_testing(self):
+        with mock.patch.object(self.orclient, "test_key") as t:
+            for bad in ("", "sk-or a", "sk-or\nX=1", "x" * 300):
+                self.assertEqual(
+                    self.c.put("/api/openrouter-key", json={"key": bad}).status_code, 400)
+        t.assert_not_called()
+
+    def test_status_reports_env_source(self):
+        self.assertEqual(self.c.get("/api/openrouter-key").json(),
+                         {"configured": True, "source": "environment"})

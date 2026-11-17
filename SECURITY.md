@@ -16,4 +16,4 @@ Say what is affected, how to reproduce it and what impact you expect. You'll get
 - The dashboard and `/api/*` need `PENNY_ADMIN_TOKEN`. Without it they only answer requests from localhost.
 - `/v1/*` is rate limited per client IP (`PENNY_RATE_LIMIT`, default 120 requests per minute).
 - JAR does **not** handle TLS. Anything beyond your LAN or VPN must go through a reverse proxy with HTTPS, because keys and the admin token travel in request headers.
-- Your OpenRouter key stays in `.env` on the host and is only ever sent to OpenRouter.
+- Your OpenRouter key stays on the host (`.env`, or `data/openrouter_key` when set from the dashboard) and is only ever sent to OpenRouter. The API never returns it.

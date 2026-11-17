@@ -21,16 +21,22 @@ let PROVIDERS = [];
 let CHAIN_AVAIL = {};
 const CAT = { q: "", tier: "", family: "", tag: "", sort: "", limit: 50, offset: 0, total: 0, results: [], facets: null };
 
-let _adminPromptDone = false;
-async function api(path, opts = {}) {
+let _adminPrompt = null;  // one shared prompt: parallel 401s must not open one each
+function askAdminToken() {
+  if (!_adminPrompt) {
+    const t = (prompt("Admin token (PENNY_ADMIN_TOKEN on the server):") || "").trim();
+    if (t) localStorage.setItem("penny_admin", t);
+    _adminPrompt = Promise.resolve(!!t);
+    // a later 401 (wrong/rotated token) can prompt again, but not within this burst
+    setTimeout(() => { _adminPrompt = null; }, 2000);
+  }
+  return _adminPrompt;
+}
+async function api(path, opts = {}, retried = false) {
   const tok = localStorage.getItem("penny_admin");
   const o = tok ? { ...opts, headers: { ...(opts.headers || {}), "X-Admin-Token": tok } } : opts;
   const r = await fetch(path, o);
-  if (r.status === 401 && !_adminPromptDone) {
-    const t = prompt("Admin token (PENNY_ADMIN_TOKEN on the server):");
-    if (!t) _adminPromptDone = true;  // cancelled: don't re-prompt on every poll
-    else { localStorage.setItem("penny_admin", t.trim()); return api(path, opts); }
-  }
+  if (r.status === 401 && !retried && await askAdminToken()) return api(path, opts, true);
   if (!r.ok) {
     let msg = r.status;
     try { msg = (await r.json()).detail || msg; } catch (e) {}
@@ -1381,6 +1387,13 @@ function viewSettings() {
   const s = STATE.settings;
   $("#view").innerHTML = `
     <div class="page-head"><div><h1>Settings</h1><div class="sub">Engine behaviour. Applied live — no restart needed.</div></div></div>
+    <div class="panel"><h2>OpenRouter key</h2>
+      <div class="hint" id="or-status" style="margin-bottom:6px"><span class="spinner"></span></div>
+      <div class="row-ctl">
+        <div><label class="field" for="or-key">New key</label><input type="password" id="or-key" placeholder="sk-or-..." autocomplete="off" spellcheck="false"></div>
+      </div>
+      <div class="hint">Tested against OpenRouter before it is saved in <code>data/</code>. It is never shown again.</div>
+      <div style="margin-top:14px"><button class="primary" id="btn-or-key">Test &amp; save key</button></div></div>
     <div class="panel"><h2>Cost model</h2>
       <div class="hint" style="margin-bottom:6px">Blended $/M = in_f · input + cache_f · cache + out_f · output. Defaults from your measured month: 14 / 85 / 1.</div>
       ${mixControls("s")}
@@ -1395,6 +1408,23 @@ function viewSettings() {
       <label class="switch"><input type="checkbox" id="s-restart" ${s.gateway_restart ? "checked" : ""}> Restart gateway after switching (required for the new pin to take effect)</label>
       <div style="margin-top:14px"><button class="primary" id="btn-save">Save settings</button></div></div>`;
   ["in", "cache", "out"].forEach(k => $("#s-" + k).value = Math.round(STATE.settings.mix[k] * 100));
+  const showKeyStatus = st => {
+    $("#or-status").innerHTML = st.configured
+      ? `<span class="badge ok">configured</span> from ${esc(st.source)}`
+      : '<span class="badge bad">not configured</span> requests to OpenRouter will fail';
+  };
+  api("/api/openrouter-key").then(showKeyStatus).catch(e => { $("#or-status").textContent = e.message; });
+  $("#btn-or-key").onclick = async () => {
+    const input = $("#or-key"), btn = $("#btn-or-key");
+    if (!input.value.trim()) { toast("Paste a key first", true); return; }
+    btn.disabled = true;
+    try {
+      const r = await api("/api/openrouter-key", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: input.value }) });
+      showKeyStatus(r);
+      toast("Key works and is saved");
+    } catch (e) { toast(e.message, true); }
+    finally { input.value = ""; btn.disabled = false; }
+  };
   $("#btn-save").onclick = async () => {
     try {
       const body = {

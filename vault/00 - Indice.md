@@ -28,7 +28,8 @@ Router AI "frugale" per OpenRouter: classifica ogni coppia modello × provider p
 |---|---|---|---|
 | [[app]] | `app.py` | 548 | Rotte FastAPI, modelli Pydantic, file statici |
 | [[router_proxy]] | `router_proxy.py` | 264 | Proxy OpenAI-compatibile con failover per richiesta |
-| [[engine]] | `engine.py` | 143 | Thread in background: valuta la catena primaria e riscrive la config Hermes |
+| [[engine]] | `engine.py` | 149 | Thread in background: valuta la catena primaria e riscrive la config Hermes |
+| [[notify]] | `notify.py` | 45 | Webhook `PENNY_WEBHOOK_URL` quando cambia la scelta della primaria |
 | [[ranking]] | `ranking.py` | 149 | Costo blended, health gate, risoluzione catena |
 | [[providers]] | `providers.py` | 314 | Registro provider, limiti, contatori di utilizzo |
 | [[orclient]] | `orclient.py` | 201 | Client OpenRouter con cache in memoria, classificazione catalogo |

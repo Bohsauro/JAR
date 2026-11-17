@@ -30,7 +30,7 @@ Installer a comando unico, pensato per Linux:
 4. Se la chiave non è in ambiente, né in `~/.hermes/.env`, né in `.env`: la chiede e la salva in `.env` (`chmod 600`).
 5. Se c'è `systemctl` **e** gira come root: scrive `/etc/systemd/system/pennyroute.service` (`Restart=always`, `EnvironmentFile=-<dir>/.env`, utente `$SUDO_USER`) e lo abilita. Altrimenti stampa il comando manuale.
 
-Variabili: `PENNY_PORT` (default 8490), `PENNY_INSTALL_DIR`.
+Variabili: `PENNY_PORT` (default 8490), `PENNY_INSTALL_DIR`. A runtime: `PENNY_ADMIN_TOKEN`, `PENNY_RATE_LIMIT`, `PENNY_WEBHOOK_URL` (vedi [[notify]]).
 
 ## Dipendenze (`requirements.txt`)
 
@@ -46,7 +46,9 @@ Solo limiti inferiori, nessun lock file. `httpx` serve al proxy; [[orclient]] us
 
 ## Chiave OpenRouter
 
-Ordine: `OPENROUTER_API_KEY` in ambiente → `.env` nella cwd → `~/.hermes/.env`. Non c'è controllo all'avvio: senza chiave il server parte e le chiamate a OpenRouter falliscono a runtime.
+Ordine (`orclient._key_lookup`): `data/openrouter_key` (salvata da Settings, vince) → `OPENROUTER_API_KEY` in ambiente → `.env` nella cwd → `~/.hermes/.env`. Senza chiave il server parte con un warning e le chiamate falliscono a runtime.
+
+Da GUI (2026-11-17): Settings → OpenRouter key. `PUT /api/openrouter-key` valida il formato, prova la chiave con `GET https://openrouter.ai/api/v1/key` e la salva solo se OpenRouter risponde 200 (scrittura atomica, permessi 600). `GET` restituisce solo `{configured, source}`, mai la chiave. Evento `openrouter_key_set`. Test: `OpenRouterKeyFromDashboard`.
 
 ## Integrazione Hermes Agent
 

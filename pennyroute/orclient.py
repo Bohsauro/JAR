@@ -12,8 +12,14 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+import httpx
+
 HOME = Path.home()
 ENV_FILE = HOME / ".hermes" / ".env"
+# key entered in the dashboard; data/ is the one directory persisted in Docker
+SAVED_KEY_FILE = Path(__file__).resolve().parent.parent / "data" / "openrouter_key"
+KEY_TEST_URL = "https://openrouter.ai/api/v1/key"
+KEY_TEST_TIMEOUT_S = 10
 
 ENDPOINTS_TTL = 600
 ERROR_TTL = 30  # failures are retried soon, not cached like good data
@@ -23,27 +29,69 @@ _lock = threading.Lock()
 _cache: dict = {}
 
 
-def get_key() -> str:
-    key = os.environ.get("OPENROUTER_API_KEY")
-    if key:
-        return key.strip()
-    # project-local .env (gitignored) — installer writes the key here
+def _env_file_key(path: Path, name: str = "OPENROUTER_API_KEY") -> str:
     try:
-        for line in (Path.cwd() / ".env").read_text().splitlines():
-            if line.startswith("OPENROUTER_API_KEY="):
+        for line in path.read_text().splitlines():
+            if line.startswith(name + "="):
                 v = line.split("=", 1)[1].strip()
                 if v:
                     return v
-    except (FileNotFoundError, OSError):
-        pass
-    prefix = "OPENROUTER_API_" + "KEY="
-    try:
-        for line in ENV_FILE.read_text().splitlines():
-            if line.startswith(prefix):
-                return line.split("=", 1)[1].strip()
-    except FileNotFoundError:
+    except OSError:
         pass
     return ""
+
+
+def _key_lookup() -> tuple[str | None, str]:
+    """(source, key). The dashboard key wins: saving one is an explicit choice."""
+    try:
+        saved = SAVED_KEY_FILE.read_text().strip()
+    except OSError:
+        saved = ""
+    if saved:
+        return "dashboard", saved
+    env = (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+    if env:
+        return "environment", env
+    # project-local .env (gitignored): the installer writes the key here
+    local = _env_file_key(Path.cwd() / ".env")
+    if local:
+        return ".env", local
+    hermes = _env_file_key(ENV_FILE, "OPENROUTER_API_" + "KEY")
+    if hermes:
+        return "hermes", hermes
+    return None, ""
+
+
+def get_key() -> str:
+    return _key_lookup()[1]
+
+
+def key_source() -> str | None:
+    return _key_lookup()[0]
+
+
+def test_key(key: str) -> tuple[bool, str]:
+    """Ask OpenRouter whether the key is valid. Never echoes the key back."""
+    try:
+        r = httpx.get(KEY_TEST_URL, headers={"Authorization": f"Bearer {key}"},
+                      timeout=KEY_TEST_TIMEOUT_S)
+    except httpx.HTTPError as e:
+        return False, f"could not reach OpenRouter ({type(e).__name__})"
+    if r.status_code == 200:
+        return True, ""
+    if r.status_code in (401, 403):
+        return False, "OpenRouter rejected the key"
+    return False, f"OpenRouter answered {r.status_code}"
+
+
+def save_key(key: str) -> None:
+    """Atomic write, owner-only permissions where the OS supports them."""
+    SAVED_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SAVED_KEY_FILE.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(key + "\n")
+    os.replace(tmp, SAVED_KEY_FILE)
 
 
 def _get(url: str, timeout: int = 40):

@@ -20,7 +20,7 @@ Thread daemon che applica la catena primaria alla configurazione di **Hermes Age
 | `read_config()` | 29 | Legge `~/.hermes/config.yaml`; `{}` se assente o YAML rotto |
 | `current_active()` | 38 | `{model, order, config_path}` dalla config attuale |
 | `apply_choice(model, provider, restart)` | 47 | Scrive la config, opzionalmente riavvia il gateway, logga `apply` |
-| `evaluate_primary()` | 75 | Classifica, risolve la primaria, applica se diverso, salva telemetria |
+| `evaluate_primary()` | 75 | Classifica, risolve la primaria, applica se diverso, notifica il cambio rispetto all'ultimo punto di telemetria ([[notify]]), salva telemetria |
 | `_loop()` | 119 | Ciclo: `evaluate_primary`, poi attesa `interval_min` minuti (minimo 1) |
 | `start()` / `stop()` | 129 / 138 | Avvia il thread (idempotente) / segnala lo stop |
 

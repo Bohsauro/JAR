@@ -15,6 +15,7 @@ from pathlib import Path
 
 import yaml
 
+from . import notify
 from . import ranking
 from . import store
 
@@ -107,6 +108,11 @@ def evaluate_primary() -> dict:
         else:
             report["applied"] = "unchanged"
     if res:
+        # route change vs the last snapshot: works with or without Hermes
+        last = (store.load_telemetry(1) or [None])[-1]
+        if last and (last.get("model"), last.get("provider")) != (
+                res["model"], res["provider"]):
+            notify.route_changed(last, res)
         # telemetry snapshot: what the chain resolves to right now
         store.push_telemetry({
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),

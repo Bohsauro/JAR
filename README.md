@@ -173,11 +173,25 @@ One-click watchlists in the **Watchlist** tab, or `POST /api/presets/<name>`:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `OPENROUTER_API_KEY` | — | **Required.** Reads the catalog and forwards requests. |
+| `OPENROUTER_API_KEY` | — | Reads the catalog and forwards requests. Required unless you set the key in **Settings → OpenRouter key**, which takes precedence. |
 | `PENNY_ADMIN_TOKEN` | unset | Password for the dashboard and `/api/*`. Without it they only answer to localhost. |
 | `PENNY_RATE_LIMIT` | `120` | Max `/v1` requests per minute per client IP. `0` turns the limit off. |
+| `PENNY_WEBHOOK_URL` | unset | Webhook called when the primary chain picks a different model or provider. See [Notifications](#notifications). |
 
 The installer also reads `PENNY_PORT` (default `8490`) and `PENNY_INSTALL_DIR` (default `~/pennyroute`).
+
+### Notifications
+
+Set `PENNY_WEBHOOK_URL` and JAR posts a message every time the engine's pick changes. It compares each evaluation with the previous one, so it works with or without Hermes. The JSON body has the message in both `text` and `content`, plus `event`, `from`, `to` and `blended`:
+
+| Service | `PENNY_WEBHOOK_URL` |
+|---|---|
+| Slack | an incoming webhook URL |
+| Discord | a channel webhook URL |
+| Telegram | `https://api.telegram.org/bot<TOKEN>/sendMessage?chat_id=<CHAT_ID>` |
+| anything else | any URL that accepts a JSON `POST` |
+
+A failed delivery is logged as a `notify_error` event and never stops routing. The URL contains a secret, so it is never written to the log.
 
 ### Settings
 
@@ -203,10 +217,11 @@ To measure your own mix, export your OpenRouter activity CSV, add up input, cach
 | `data/chains.json` | fallback chains |
 | `data/settings.json` | token mix, health gates, interval |
 | `data/keys.json` | `/v1` API keys, stored as SHA-256 hashes |
+| `data/openrouter_key` | OpenRouter key set from the dashboard (owner-only permissions) |
 | `data/providers.json` | provider budgets, blocks and notes |
 | `data/usage.json` | usage counters, written by the router |
 | `data/telemetry.json` | routing snapshots for the 24 h trend |
-| `data/events.jsonl` | append-only log of switches and errors |
+| `data/events.jsonl` | log of switches and errors, trimmed to 2000 lines past 1 MB |
 
 Back up `data/`: it holds everything.
 
@@ -234,6 +249,7 @@ If `~/.hermes` exists on the host, the engine writes the chosen model and provid
 | `/api/providers` | admin | budgets, blocks and usage |
 | `/api/keys` | admin | create and revoke `/v1` API keys |
 | `GET`, `PUT /api/settings` | admin | engine settings |
+| `GET`, `PUT /api/openrouter-key` | admin | key status (never the key) / test and save a new key |
 | `GET /api/events` | admin | event log |
 
 The dashboard only uses these endpoints, so anything it does can be scripted.
@@ -245,6 +261,7 @@ pennyroute/            Python package (FastAPI backend)
   app.py               routes and static files
   router_proxy.py      /v1 proxy with per-request failover
   engine.py            background evaluation loop
+  notify.py            route-change webhook
   ranking.py           blended cost, health gates, chain resolution
   providers.py         provider budgets and usage counters
   orclient.py          OpenRouter client with caching
@@ -270,8 +287,8 @@ There is no frontend build: edit `static/` and reload the page. Read [CONTRIBUTI
 
 ## Roadmap
 
-- [ ] Real spend tracking from the OpenRouter activity API
-- [ ] Notifications (Slack, Telegram, Discord) when the route changes
+- [x] Real spend tracking: budgets use the cost OpenRouter reports for each request
+- [x] Webhook notifications (Slack, Telegram, Discord) when the route changes
 - [ ] Backends beyond OpenRouter
 - [x] Docker image
 - [x] Provider budgets and usage tracking
