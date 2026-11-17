@@ -332,3 +332,11 @@ class OpenRouterKeyFromDashboard(unittest.TestCase):
     def test_status_reports_env_source(self):
         self.assertEqual(self.c.get("/api/openrouter-key").json(),
                          {"configured": True, "source": "environment"})
+
+
+class DashboardCaching(unittest.TestCase):
+    def test_dashboard_files_are_revalidated(self):
+        from pennyroute import app as appmod
+        c = _client(appmod.app)
+        for path in ("/", "/landing", "/app.js", "/style.css"):
+            self.assertEqual(c.get(path).headers.get("cache-control"), "no-cache", path)

@@ -611,24 +611,29 @@ def api_telemetry():
 
 # ---------------------------------------------------------------- static --
 
+# no-cache = revalidate via ETag every load, so a redeploy shows up without Ctrl+F5
+_REVALIDATE = {"Cache-Control": "no-cache"}
+
+
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(STATIC_DIR / "index.html", headers=_REVALIDATE)
 
 
 @app.get("/landing")
 def landing():
-    return FileResponse(STATIC_DIR / "landing.html")
+    return FileResponse(STATIC_DIR / "landing.html", headers=_REVALIDATE)
 
 
 @app.get("/style.css")
 def style():
-    return FileResponse(STATIC_DIR / "style.css", media_type="text/css")
+    return FileResponse(STATIC_DIR / "style.css", media_type="text/css", headers=_REVALIDATE)
 
 
 @app.get("/app.js")
 def js():
-    return FileResponse(STATIC_DIR / "app.js", media_type="text/javascript")
+    return FileResponse(STATIC_DIR / "app.js", media_type="text/javascript",
+                        headers=_REVALIDATE)
 
 
 @app.get("/logo.svg")
