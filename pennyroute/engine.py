@@ -91,6 +91,10 @@ def evaluate_primary() -> dict:
                                  "min_uptime": settings["min_uptime"]})
     report = {"ok": bool(res), "chain": primary["name"], "resolution": res,
               "active": current_active(), "auto_apply": primary.get("auto_apply", True)}
+    if not res:
+        report["reason"] = (f"no healthy step in chain '{primary['name']}': every "
+                            f"provider is below {settings['min_tps']} tps or "
+                            f"{settings['min_uptime']}% uptime, over budget or blocked")
 
     # applying only makes sense on a host that runs Hermes (~/.hermes exists)
     if res and primary.get("auto_apply", True) and CONFIG_PATH.parent.exists():

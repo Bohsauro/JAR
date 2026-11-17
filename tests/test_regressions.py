@@ -334,9 +334,22 @@ class OpenRouterKeyFromDashboard(unittest.TestCase):
                          {"configured": True, "source": "environment"})
 
 
-class DashboardCaching(unittest.TestCase):
+class EngineAndDashboard(unittest.TestCase):
     def test_dashboard_files_are_revalidated(self):
         from pennyroute import app as appmod
         c = _client(appmod.app)
         for path in ("/", "/landing", "/app.js", "/style.css"):
             self.assertEqual(c.get(path).headers.get("cache-control"), "no-cache", path)
+
+    def test_no_healthy_step_reports_a_reason(self):
+        from pennyroute import engine
+        primary = {"name": "main", "primary": True, "auto_apply": False, "entries": []}
+        with mock.patch.object(engine.store, "load_settings",
+                               return_value={"mix": {}, "min_tps": 45, "min_uptime": 99}), \
+             mock.patch.object(engine.store, "load_models", return_value=["m"]), \
+             mock.patch.object(engine.store, "load_chains", return_value=[primary]), \
+             mock.patch.object(engine.ranking, "rank_models", return_value=[]), \
+             mock.patch.object(engine.ranking, "resolve_chain", return_value=None):
+            report = engine.evaluate_primary()
+        self.assertFalse(report["ok"])
+        self.assertIn("45 tps", report["reason"])
